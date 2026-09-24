@@ -106,6 +106,13 @@ else
     [[ -e $CREDENTIALS_FILE ]] || die 'Existing 1Panel credentials are unknown; cannot print its password.'
 fi
 systemctl is-active --quiet 1panel || die '1Panel service is not active.'
+if [[ ! -e $CREDENTIALS_FILE ]]; then
+    # Save them as soon as the panel succeeds so an interrupted install can resume.
+    install -d -m 700 /root/.config/debian12-init
+    printf 'PANEL_PORT=%q\nPANEL_USER=%q\nPANEL_PASSWORD=%q\nVNC_PASSWORD=%q\nDESKTOP_USER=%q\n' \
+        "$PANEL_PORT" "$PANEL_USER" "$PANEL_PASSWORD" "$VNC_PASSWORD" "$DESKTOP_USER" > "$CREDENTIALS_FILE"
+    chmod 600 "$CREDENTIALS_FILE"
+fi
 
 log 'Installing the minimal XFCE session and TigerVNC'
 apt-get install -y --no-install-recommends \
@@ -196,13 +203,10 @@ DESKTOP
 chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
 chmod 755 "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
 
-if [[ ! -e $CREDENTIALS_FILE ]]; then
-    install -d -m 700 /root/.config/debian12-init
-    printf 'PANEL_PORT=%q\nPANEL_USER=%q\nPANEL_PASSWORD=%q\nVNC_PASSWORD=%q\n' \
-        "$PANEL_PORT" "$PANEL_USER" "$PANEL_PASSWORD" "$VNC_PASSWORD" > "$CREDENTIALS_FILE"
-    chmod 600 "$CREDENTIALS_FILE"
-fi
-
+for attempt in {1..15}; do
+    ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' && break
+    sleep 1
+done
 ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
 PANEL_PUBLIC_IP=$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')
 printf '\n===== Setup complete =====\n'
