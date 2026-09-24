@@ -46,3 +46,9 @@ The system time zone is detected from the server's public IPv4 address using
 IP geolocation. An unsuccessful lookup leaves the existing time zone unchanged.
 Set `SERVER_TIMEZONE=Asia/Shanghai` to choose an IANA time zone explicitly, or
 `SERVER_TIMEZONE=keep` to preserve the current setting.
+
+The script also selects a date-format locale from the public IP's country. It
+sets `LC_TIME` for the system and XFCE session while keeping the desktop UI in
+Chinese. If geolocation fails, it keeps the prior date locale. Set
+`DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
+`DATE_LOCALE=keep` to preserve the current date locale.

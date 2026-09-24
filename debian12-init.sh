@@ -8,6 +8,7 @@ PANEL_PORT=${PANEL_PORT:-8080}
 PANEL_ENTRANCE=admin
 INSTALL_DOCKER=${INSTALL_DOCKER:-0}
 SERVER_TIMEZONE=${SERVER_TIMEZONE:-auto}
+DATE_LOCALE=${DATE_LOCALE:-auto}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
 VNC_DISPLAY=:1
 VNC_PORT=5901
@@ -46,7 +47,7 @@ valid_timezone() {
 if [[ $SERVER_TIMEZONE == auto ]]; then
     DETECTED_TIMEZONE=
     if [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        for provider_url in "https://ipapi.co/$PUBLIC_IP/timezone/" "https://ipinfo.io/$PUBLIC_IP/timezone"; do
+        for provider_url in "https://ipinfo.io/$PUBLIC_IP/timezone" "https://ipapi.co/$PUBLIC_IP/timezone/"; do
             candidate=$(curl -4fsSL --max-time 8 "$provider_url" 2>/dev/null || true)
             candidate=${candidate//$'\r'/}
             candidate=${candidate//$'\n'/}
@@ -159,6 +160,76 @@ if ! locale -a | grep -qi '^zh_CN\.utf8$'; then
     locale-gen zh_CN.UTF-8
 fi
 
+# LC_TIME controls date formatting separately from the Chinese desktop UI.
+date_locale_for_country() {
+    local country=$1 language=en base
+    [[ $country =~ ^[A-Z]{2}$ ]] || return 1
+    case $country in
+        CN|TW|HK|MO) language=zh ;;
+        JP) language=ja ;;
+        KR) language=ko ;;
+        DE|AT|CH) language=de ;;
+        FR) language=fr ;;
+        ES|MX|AR|CL|CO|PE) language=es ;;
+        BR|PT) language=pt ;;
+        RU) language=ru ;;
+        IT) language=it ;;
+        NL|BE) language=nl ;;
+        PL) language=pl ;;
+        TR) language=tr ;;
+        TH) language=th ;;
+        VN) language=vi ;;
+        ID) language=id ;;
+    esac
+    for base in "${language}_${country}" "en_${country}"; do
+        if [[ -f /usr/share/i18n/locales/$base ]]; then
+            printf '%s.UTF-8\n' "$base"
+            return 0
+        fi
+    done
+    base=$(find /usr/share/i18n/locales -maxdepth 1 -type f -name "*_${country}" -printf '%f\n' | sort | head -n 1)
+    [[ -n $base ]] || return 1
+    printf '%s.UTF-8\n' "$base"
+}
+
+SELECTED_DATE_LOCALE=$(sed -nE 's/^LC_TIME="?([^"[:space:]]+)"?$/\1/p' /etc/default/locale | tail -n 1)
+SELECTED_DATE_LOCALE=${SELECTED_DATE_LOCALE:-zh_CN.UTF-8}
+APPLY_DATE_LOCALE=0
+if [[ $DATE_LOCALE == auto ]]; then
+    COUNTRY_CODE=
+    if [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        for provider_url in "https://ipinfo.io/$PUBLIC_IP/country" "https://ipapi.co/$PUBLIC_IP/country_code/"; do
+            candidate=$(curl -4fsSL --max-time 8 "$provider_url" 2>/dev/null || true)
+            candidate=${candidate//$'\r'/}
+            candidate=${candidate//$'\n'/}
+            if [[ $candidate =~ ^[A-Z]{2}$ ]]; then
+                COUNTRY_CODE=$candidate
+                break
+            fi
+        done
+    fi
+    if [[ -n $COUNTRY_CODE ]] && candidate=$(date_locale_for_country "$COUNTRY_CODE"); then
+        SELECTED_DATE_LOCALE=$candidate
+        APPLY_DATE_LOCALE=1
+        log "Date locale selected from public IP $PUBLIC_IP ($COUNTRY_CODE): $SELECTED_DATE_LOCALE"
+    else
+        log "IP date locale lookup failed; keeping $SELECTED_DATE_LOCALE"
+    fi
+elif [[ $DATE_LOCALE != keep ]]; then
+    SELECTED_DATE_LOCALE=$DATE_LOCALE
+    APPLY_DATE_LOCALE=1
+fi
+
+locale_base=${SELECTED_DATE_LOCALE%.UTF-8}
+[[ $SELECTED_DATE_LOCALE == "$locale_base.UTF-8" && $locale_base =~ ^[a-z]{2,3}_[A-Z]{2}$ && -f /usr/share/i18n/locales/$locale_base ]] || die "Invalid DATE_LOCALE: $SELECTED_DATE_LOCALE"
+if ! locale -a | grep -qi "^${locale_base}\.utf8$"; then
+    grep -Eq "^${locale_base}(\.UTF-8)? UTF-8$" /etc/locale.gen || printf '%s UTF-8\n' "$locale_base" >> /etc/locale.gen
+    locale-gen
+fi
+if [[ $APPLY_DATE_LOCALE == 1 ]]; then
+    update-locale "LC_TIME=$SELECTED_DATE_LOCALE"
+fi
+
 if ! id "$DESKTOP_USER" >/dev/null 2>&1; then
     useradd --create-home --shell /bin/bash "$DESKTOP_USER"
 fi
@@ -191,6 +262,7 @@ WorkingDirectory=$DESKTOP_HOME
 Environment=HOME=$DESKTOP_HOME
 Environment=LANG=zh_CN.UTF-8
 Environment=LANGUAGE=zh_CN:zh
+Environment=LC_TIME=$SELECTED_DATE_LOCALE
 ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry $VNC_GEOMETRY -depth 24 -SecurityTypes None
 ExecStop=-/usr/bin/tigervncserver -kill $VNC_DISPLAY
 Restart=on-failure
@@ -252,6 +324,7 @@ ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listen
 PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')}
 printf '\n===== Setup complete =====\n'
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
+printf 'Date locale: %s\n' "$SELECTED_DATE_LOCALE"
 printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel tunnel: ssh -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$PANEL_PORT" "$PANEL_PORT"
 printf '1Panel URL via tunnel: http://127.0.0.1:%s/%s\n' "$PANEL_PORT" "$PANEL_ENTRANCE"
