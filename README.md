@@ -1,7 +1,8 @@
 # Debian 12 server setup
 
-`debian12-init.sh` installs 1Panel, a small XFCE desktop, Google Chrome, and
-TigerVNC on a fresh Debian 12 amd64 server. It also installs `tmux`, `htop`,
+`debian12-init.sh` installs 1Panel, Docker with Compose, OpenResty through the
+1Panel app store, a small XFCE desktop, Google Chrome, and TigerVNC on a fresh
+Debian 12 amd64 server. It also installs `tmux`, `htop`,
 and `vim`, disables Vim mouse mode by default, and adds interactive Bash aliases
 for `ll`, `cp -i`, and `mv -i`. Run it as root:
 
@@ -15,8 +16,12 @@ user when installation completes. It saves the generated panel password in
 `/root/.config/debian12-init/credentials` with mode `0600` for a rerun. The
 default 1Panel port is `8080` and its account is `admin`; set `PANEL_PORT` to
 choose another port. The default desktop user is `desktop`; set `DESKTOP_USER`
-to change it. Docker is skipped by default. Set `INSTALL_DOCKER=1` if you want
-the upstream 1Panel installer to add Docker and Compose for container apps.
+to change it. Docker and OpenResty are installed by default. Set
+`INSTALL_DOCKER=0` to skip both, or `INSTALL_OPENRESTY=0` to keep Docker without
+OpenResty. On a rerun, the script also installs Docker and OpenResty if 1Panel
+already exists but they are missing. OpenResty uses ports `80` and `443` and
+appears under 1Panel's installed apps. Docker and the OpenResty container start
+automatically after a reboot.
 
 TigerVNC has no password and listens only on `127.0.0.1:5901`. From your own
 computer, create an SSH tunnel and then connect a VNC viewer to

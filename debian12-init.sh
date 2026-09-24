@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Debian 12: 1Panel, a small XFCE desktop, Chrome, and loopback-only TigerVNC.
+# Debian 12: 1Panel, Docker, OpenResty, XFCE, Chrome, and loopback-only TigerVNC.
 set -Eeuo pipefail
 umask 077
 
 PANEL_VERSION=v1.10.34-lts
 PANEL_PORT=${PANEL_PORT:-8080}
 PANEL_ENTRANCE=admin
-INSTALL_DOCKER=${INSTALL_DOCKER:-0}
+INSTALL_DOCKER=${INSTALL_DOCKER:-1}
+INSTALL_OPENRESTY=${INSTALL_OPENRESTY:-$INSTALL_DOCKER}
 SERVER_TIMEZONE=${SERVER_TIMEZONE:-auto}
 DATE_LOCALE=${DATE_LOCALE:-auto}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
@@ -28,6 +29,8 @@ trap cleanup EXIT
 [[ $PANEL_PORT =~ ^[0-9]{2,5}$ ]] && (( PANEL_PORT >= 1024 && PANEL_PORT <= 65535 )) || die 'Invalid PANEL_PORT.'
 [[ $PANEL_PORT -ne $VNC_PORT ]] || die 'PANEL_PORT conflicts with VNC.'
 [[ $INSTALL_DOCKER == 0 || $INSTALL_DOCKER == 1 ]] || die 'INSTALL_DOCKER must be 0 or 1.'
+[[ $INSTALL_OPENRESTY == 0 || $INSTALL_OPENRESTY == 1 ]] || die 'INSTALL_OPENRESTY must be 0 or 1.'
+[[ $INSTALL_OPENRESTY == 0 || $INSTALL_DOCKER == 1 ]] || die 'OpenResty requires Docker (set INSTALL_DOCKER=1).'
 [[ $VNC_GEOMETRY =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die 'Invalid VNC_GEOMETRY (expected WIDTHxHEIGHT).'
 
 export DEBIAN_FRONTEND=noninteractive
@@ -37,7 +40,7 @@ for apt_file in /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/go
 done
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography
 
 if ! grep -Fq '# debian12-init interactive aliases' /etc/bash.bashrc; then
     cat >> /etc/bash.bashrc <<'ALIASES'
@@ -162,6 +165,155 @@ install -d -m 700 /root/.config/debian12-init
 printf 'PANEL_PORT=%q\nPANEL_USER=%q\nPANEL_PASSWORD=%q\nDESKTOP_USER=%q\n' \
     "$PANEL_PORT" "$PANEL_USER" "$PANEL_PASSWORD" "$DESKTOP_USER" > "$CREDENTIALS_FILE"
 chmod 600 "$CREDENTIALS_FILE"
+
+if [[ $INSTALL_DOCKER == 1 ]]; then
+    if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+        log 'Installing Docker Engine and Compose from the official apt repository'
+        install -d -m 755 /etc/apt/keyrings
+        curl -fsSL --retry 3 https://download.docker.com/linux/debian/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod 644 /etc/apt/keyrings/docker.gpg
+        printf 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable\n' > /etc/apt/sources.list.d/docker.list
+        apt-get update
+        if command -v docker >/dev/null 2>&1; then
+            apt-get install -y --no-install-recommends docker-compose-plugin
+        else
+            apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        fi
+    fi
+    systemctl enable --now docker.service
+    systemctl is-active --quiet docker.service || die 'Docker service is not active.'
+    systemctl is-enabled --quiet docker.service || die 'Docker service is not enabled at boot.'
+    docker info >/dev/null || die 'Docker daemon is unavailable.'
+    docker compose version >/dev/null || die 'Docker Compose plugin is unavailable.'
+    # 1Panel v1 invokes the legacy command name even when Compose v2 is installed.
+    if ! command -v docker-compose >/dev/null 2>&1; then
+        cat > /usr/local/bin/docker-compose <<'COMPOSE'
+#!/bin/sh
+exec docker compose "$@"
+COMPOSE
+        chmod 755 /usr/local/bin/docker-compose
+    fi
+    docker-compose version >/dev/null || die 'The docker-compose compatibility command is unavailable.'
+fi
+
+if [[ $INSTALL_OPENRESTY == 1 ]]; then
+    log 'Installing OpenResty through the 1Panel app store'
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    cat > "$WORK_DIR/install-openresty.py" <<'PYTHON'
+import base64
+import http.cookiejar
+import json
+import os
+import secrets
+import time
+import urllib.parse
+import urllib.request
+
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+
+port = os.environ['PANEL_PORT']
+base = f'http://127.0.0.1:{port}'
+jar = http.cookiejar.CookieJar()
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+
+def request(method, path, data=None, extra_headers=None):
+    headers = {'Content-Type': 'application/json', 'Accept-Language': 'en'}
+    headers.update(extra_headers or {})
+    payload = None if data is None else json.dumps(data).encode()
+    req = urllib.request.Request(base + path, payload, headers, method=method)
+    with opener.open(req, timeout=45) as response:
+        result = json.load(response)
+    if result.get('code') != 200:
+        raise RuntimeError(f'{path}: {result.get("message", result)}')
+    return result.get('data')
+
+
+with opener.open(base + '/admin', timeout=30):
+    pass
+key_cookie = next((c.value for c in jar if c.name == 'panel_public_key'), None)
+if not key_cookie:
+    raise RuntimeError('1Panel public key cookie is unavailable')
+public_key = load_pem_public_key(base64.b64decode(urllib.parse.unquote(key_cookie)))
+aes_key = secrets.token_hex(16).encode()
+iv = secrets.token_bytes(16)
+padder = padding.PKCS7(128).padder()
+plain = padder.update(os.environ['PANEL_PASSWORD'].encode()) + padder.finalize()
+encryptor = Cipher(algorithms.AES(aes_key), modes.CBC(iv)).encryptor()
+ciphertext = encryptor.update(plain) + encryptor.finalize()
+encrypted_key = public_key.encrypt(aes_key, rsa_padding.PKCS1v15())
+password = ':'.join(base64.b64encode(part).decode() for part in (encrypted_key, iv, ciphertext))
+entrance = base64.b64encode(b'admin').decode()
+language = request('GET', '/api/v1/auth/setting').get('language') or 'en'
+login = request('POST', '/api/v1/auth/login', {
+    'name': os.environ['PANEL_USER'], 'password': password,
+    'authMethod': 'session', 'language': language,
+}, {'EntranceCode': entrance})
+if login.get('mfaStatus') == 'enable':
+    raise RuntimeError('1Panel MFA is enabled; automatic OpenResty installation cannot log in')
+
+
+def installed():
+    return request('POST', '/api/v1/apps/installed/check', {'key': 'openresty', 'name': 'openresty'})
+
+
+current = installed()
+if not current.get('isExist'):
+    try:
+        app = request('GET', '/api/v1/apps/openresty')
+    except RuntimeError:
+        request('POST', '/api/v1/apps/sync', {})
+        deadline = time.monotonic() + 900
+        while True:
+            time.sleep(10)
+            try:
+                app = request('GET', '/api/v1/apps/openresty')
+                break
+            except RuntimeError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError('1Panel app store did not publish OpenResty within 15 minutes')
+    version = app['versions'][0]
+    detail = request('GET', f'/api/v1/apps/detail/{app["id"]}/{version}/app')
+    if not detail.get('enable', True):
+        raise RuntimeError('1Panel reports that OpenResty is unavailable on this server')
+    params = {field['envKey']: field.get('default', '')
+              for field in detail['params'].get('formFields', [])}
+    request('POST', '/api/v1/apps/install', {
+        'appDetailId': detail['id'], 'name': 'openresty', 'params': params,
+        'advanced': False, 'allowPort': True, 'pullImage': True,
+    })
+    print(f'1Panel OpenResty {version} installation started', flush=True)
+elif current.get('status', '').lower() in {'uperr', 'downloaderr', 'error', 'stopped'}:
+    operation = 'start' if current['status'].lower() == 'stopped' else 'rebuild'
+    request('POST', '/api/v1/apps/installed/op', {
+        'installId': current['appInstallId'], 'operate': operation,
+    })
+    print(f'1Panel OpenResty {operation} requested', flush=True)
+
+deadline = time.monotonic() + 1200
+while True:
+    current = installed()
+    status = current.get('status', '').lower()
+    if status == 'running':
+        with open(os.environ['OPENRESTY_CONTAINER_FILE'], 'w', encoding='utf-8') as container_file:
+            container_file.write(current['containerName'])
+        print(f'1Panel OpenResty is running on HTTP {current.get("httpPort")} / HTTPS {current.get("httpsPort")}', flush=True)
+        break
+    if 'error' in status or status in {'uperr', 'installerr'}:
+        raise RuntimeError(f'OpenResty installation failed: {current}')
+    if time.monotonic() > deadline:
+        raise RuntimeError(f'OpenResty did not reach running state within 20 minutes: {current}')
+    time.sleep(10)
+PYTHON
+    OPENRESTY_CONTAINER_FILE="$WORK_DIR/openresty-container"
+    export PANEL_PORT PANEL_USER PANEL_PASSWORD OPENRESTY_CONTAINER_FILE
+    python3 "$WORK_DIR/install-openresty.py"
+    docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$(cat "$OPENRESTY_CONTAINER_FILE")" | grep -Eq '^(always|unless-stopped)$' || die 'OpenResty container has no boot restart policy.'
+fi
 
 log 'Installing the minimal XFCE session and TigerVNC'
 apt-get install -y --no-install-recommends \
