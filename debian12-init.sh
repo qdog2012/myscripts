@@ -37,7 +37,21 @@ for apt_file in /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/go
 done
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim
+
+if ! grep -Fq '# debian12-init interactive aliases' /etc/bash.bashrc; then
+    cat >> /etc/bash.bashrc <<'ALIASES'
+
+# debian12-init interactive aliases
+alias ll='ls $LS_OPTIONS -l'
+alias cp='cp -i'
+alias mv='mv -i'
+ALIASES
+fi
+if ! grep -Fqx 'set mouse=' /etc/vim/vimrc.local 2>/dev/null; then
+    printf '\n" debian12-init: disable mouse mode by default\nset mouse=\n' >> /etc/vim/vimrc.local
+fi
+chmod 644 /etc/vim/vimrc.local
 
 # Use the server's public IPv4 address, not its private interface address.
 PUBLIC_IP=$(curl -4fsSL --max-time 8 https://api.ipify.org 2>/dev/null || true)

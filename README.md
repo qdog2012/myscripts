@@ -1,7 +1,9 @@
 # Debian 12 server setup
 
 `debian12-init.sh` installs 1Panel, a small XFCE desktop, Google Chrome, and
-TigerVNC on a fresh Debian 12 amd64 server. Run it as root:
+TigerVNC on a fresh Debian 12 amd64 server. It also installs `tmux`, `htop`,
+and `vim`, disables Vim mouse mode by default, and adds interactive Bash aliases
+for `ll`, `cp -i`, and `mv -i`. Run it as root:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-init.sh
