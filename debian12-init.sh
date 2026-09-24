@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 
 PANEL_VERSION=v1.10.34-lts
-PANEL_PORT=${PANEL_PORT:-10086}
+PANEL_PORT=${PANEL_PORT:-8080}
 PANEL_ENTRANCE=admin
 INSTALL_DOCKER=${INSTALL_DOCKER:-0}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
@@ -54,10 +54,8 @@ if [[ -e $CREDENTIALS_FILE ]]; then
     # shellcheck source=/dev/null
     source "$CREDENTIALS_FILE"
 else
-    PANEL_USER="admin$(openssl rand -hex 3)"
+    PANEL_USER=admin
     PANEL_PASSWORD=$(openssl rand -hex 12)
-    # Classic VNC authentication uses only the first eight password characters.
-    VNC_PASSWORD=$(openssl rand -hex 4)
 fi
 
 if ! command -v 1pctl >/dev/null 2>&1; then
@@ -106,18 +104,17 @@ else
     [[ -e $CREDENTIALS_FILE ]] || die 'Existing 1Panel credentials are unknown; cannot print its password.'
 fi
 systemctl is-active --quiet 1panel || die '1Panel service is not active.'
-if [[ ! -e $CREDENTIALS_FILE ]]; then
-    # Save them as soon as the panel succeeds so an interrupted install can resume.
-    install -d -m 700 /root/.config/debian12-init
-    printf 'PANEL_PORT=%q\nPANEL_USER=%q\nPANEL_PASSWORD=%q\nVNC_PASSWORD=%q\nDESKTOP_USER=%q\n' \
-        "$PANEL_PORT" "$PANEL_USER" "$PANEL_PASSWORD" "$VNC_PASSWORD" "$DESKTOP_USER" > "$CREDENTIALS_FILE"
-    chmod 600 "$CREDENTIALS_FILE"
-fi
+# Save them as soon as the panel succeeds so an interrupted install can resume.
+# Rewriting also removes any VNC password saved by an older script revision.
+install -d -m 700 /root/.config/debian12-init
+printf 'PANEL_PORT=%q\nPANEL_USER=%q\nPANEL_PASSWORD=%q\nDESKTOP_USER=%q\n' \
+    "$PANEL_PORT" "$PANEL_USER" "$PANEL_PASSWORD" "$DESKTOP_USER" > "$CREDENTIALS_FILE"
+chmod 600 "$CREDENTIALS_FILE"
 
 log 'Installing the minimal XFCE session and TigerVNC'
 apt-get install -y --no-install-recommends \
     xfce4-session xfce4-panel xfdesktop4 xfwm4 xfce4-terminal thunar \
-    dbus-x11 tigervnc-standalone-server tigervnc-tools fonts-dejavu-core
+    dbus-x11 tigervnc-standalone-server fonts-dejavu-core
 
 if ! id "$DESKTOP_USER" >/dev/null 2>&1; then
     useradd --create-home --shell /bin/bash "$DESKTOP_USER"
@@ -136,10 +133,7 @@ XSTARTUP
 chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/.vnc/xstartup"
 chmod 700 "$DESKTOP_HOME/.vnc/xstartup"
 
-VNC_PASSWD_CMD=$(command -v tigervncpasswd || command -v vncpasswd) || die 'TigerVNC password tool is missing.'
-printf '%s\n' "$VNC_PASSWORD" | "$VNC_PASSWD_CMD" -f > "$DESKTOP_HOME/.vnc/passwd"
-chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/.vnc/passwd"
-chmod 600 "$DESKTOP_HOME/.vnc/passwd"
+rm -f -- "$DESKTOP_HOME/.vnc/passwd"
 
 cat > /etc/systemd/system/tigervnc-desktop.service <<EOF
 [Unit]
@@ -152,7 +146,7 @@ User=$DESKTOP_USER
 Group=$DESKTOP_USER
 WorkingDirectory=$DESKTOP_HOME
 Environment=HOME=$DESKTOP_HOME
-ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry 1280x720 -depth 24 -SecurityTypes VncAuth
+ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry 1280x720 -depth 24 -SecurityTypes None
 ExecStop=-/usr/bin/tigervncserver -kill $VNC_DISPLAY
 Restart=on-failure
 RestartSec=5
@@ -161,7 +155,8 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now tigervnc-desktop.service
+systemctl enable tigervnc-desktop.service
+systemctl restart tigervnc-desktop.service
 systemctl is-active --quiet tigervnc-desktop.service || die 'TigerVNC service is not active.'
 
 log 'Installing Google Chrome from the official apt repository'
@@ -214,7 +209,7 @@ printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_
 printf '1Panel tunnel: ssh -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$PANEL_PORT" "$PANEL_PORT"
 printf '1Panel URL via tunnel: http://127.0.0.1:%s/%s\n' "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel account: %s\n1Panel password: %s\n' "$PANEL_USER" "$PANEL_PASSWORD"
-printf 'Desktop user: %s\nVNC password: %s\n' "$DESKTOP_USER" "$VNC_PASSWORD"
+printf 'Desktop user: %s\nVNC authentication: none (loopback only)\n' "$DESKTOP_USER"
 printf 'VNC tunnel: ssh -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n'
 printf 'VNC viewer: 127.0.0.1:5901\n'
 printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
