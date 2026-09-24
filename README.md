@@ -41,3 +41,8 @@ allow inbound TCP `8080` in the cloud firewall or security group.
 The script uses the official 1Panel `v1.10.34-lts` package and verifies its
 SHA-256 checksum. It installs Chrome from Google's signed apt repository. For
 machines with less than 2 GiB RAM and no active swap, it adds a 2 GiB swap file.
+
+The system time zone is detected from the server's public IPv4 address using
+IP geolocation. An unsuccessful lookup leaves the existing time zone unchanged.
+Set `SERVER_TIMEZONE=Asia/Shanghai` to choose an IANA time zone explicitly, or
+`SERVER_TIMEZONE=keep` to preserve the current setting.

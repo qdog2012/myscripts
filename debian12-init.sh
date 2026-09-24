@@ -7,6 +7,7 @@ PANEL_VERSION=v1.10.34-lts
 PANEL_PORT=${PANEL_PORT:-8080}
 PANEL_ENTRANCE=admin
 INSTALL_DOCKER=${INSTALL_DOCKER:-0}
+SERVER_TIMEZONE=${SERVER_TIMEZONE:-auto}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
 VNC_DISPLAY=:1
 VNC_PORT=5901
@@ -35,7 +36,39 @@ for apt_file in /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/go
 done
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata
+
+# Use the server's public IPv4 address, not its private interface address.
+PUBLIC_IP=$(curl -4fsSL --max-time 8 https://api.ipify.org 2>/dev/null || true)
+valid_timezone() {
+    [[ ( $1 == UTC || $1 =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)+$ ) && -f /usr/share/zoneinfo/$1 ]]
+}
+if [[ $SERVER_TIMEZONE == auto ]]; then
+    DETECTED_TIMEZONE=
+    if [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        for provider_url in "https://ipapi.co/$PUBLIC_IP/timezone/" "https://ipinfo.io/$PUBLIC_IP/timezone"; do
+            candidate=$(curl -4fsSL --max-time 8 "$provider_url" 2>/dev/null || true)
+            candidate=${candidate//$'\r'/}
+            candidate=${candidate//$'\n'/}
+            if valid_timezone "$candidate"; then
+                DETECTED_TIMEZONE=$candidate
+                break
+            fi
+        done
+    fi
+    if [[ -n $DETECTED_TIMEZONE ]]; then
+        timedatectl set-timezone "$DETECTED_TIMEZONE"
+        log "Time zone set from public IP $PUBLIC_IP: $DETECTED_TIMEZONE"
+    else
+        log "IP time zone lookup failed; keeping $(timedatectl show -p Timezone --value)"
+    fi
+elif [[ $SERVER_TIMEZONE == keep ]]; then
+    log "Keeping current time zone: $(timedatectl show -p Timezone --value)"
+else
+    valid_timezone "$SERVER_TIMEZONE" || die "Invalid SERVER_TIMEZONE: $SERVER_TIMEZONE"
+    timedatectl set-timezone "$SERVER_TIMEZONE"
+    log "Time zone set to $SERVER_TIMEZONE"
+fi
 
 # A 1.6 GiB machine has little headroom for Docker, XFCE, and Chrome together.
 if (( $(awk '/MemTotal:/ {print $2}' /proc/meminfo) < 2097152 )) &&
@@ -216,8 +249,9 @@ for attempt in {1..15}; do
     sleep 1
 done
 ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
-PANEL_PUBLIC_IP=$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')
+PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')}
 printf '\n===== Setup complete =====\n'
+printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
 printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel tunnel: ssh -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$PANEL_PORT" "$PANEL_PORT"
 printf '1Panel URL via tunnel: http://127.0.0.1:%s/%s\n' "$PANEL_PORT" "$PANEL_ENTRANCE"
