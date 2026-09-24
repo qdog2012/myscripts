@@ -41,7 +41,10 @@ Then open `http://127.0.0.1:8080/admin`. To use the public 1Panel URL,
 allow inbound TCP `8080` in the cloud firewall or security group.
 
 The script uses the official 1Panel `v1.10.34-lts` package and verifies its
-SHA-256 checksum. It installs Chrome from Google's signed apt repository. For
+SHA-256 checksum. It installs Chrome from Google's signed apt repository and
+disables Chrome's on-device AI model through the managed
+`GenAILocalFoundationalModelSettings` policy. This keeps the setting off for all
+Chrome profiles and shows it as managed in Chrome settings. For
 machines with less than 2 GiB RAM and no active swap, it adds a 2 GiB swap file.
 
 The system time zone is detected from the server's public IPv4 address using

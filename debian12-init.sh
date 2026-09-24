@@ -298,6 +298,12 @@ chmod 644 /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/google-c
 apt-get update
 apt-get install -y --no-install-recommends google-chrome-stable
 
+# Chrome's supported enterprise policy disables the local GenAI model and
+# removes an already downloaded model. Keep this policy readable by all users.
+install -d -m 755 /etc/opt/chrome/policies/managed
+printf '{"GenAILocalFoundationalModelSettings":1}\n' > /etc/opt/chrome/policies/managed/10-on-device-ai.json
+chmod 644 /etc/opt/chrome/policies/managed/10-on-device-ai.json
+
 cat > /usr/local/bin/chrome-low-resource <<'CHROME'
 #!/bin/sh
 # Keep background work and renderer fan-out small; preserve Chrome's sandbox.
