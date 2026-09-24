@@ -49,6 +49,7 @@ Set `SERVER_TIMEZONE=Asia/Shanghai` to choose an IANA time zone explicitly, or
 
 The script also selects a date-format locale from the public IP's country. It
 sets `LC_TIME` for the system and XFCE session while keeping the desktop UI in
-Chinese. If geolocation fails, it keeps the prior date locale. Set
+Chinese. It also sets the XFCE panel clock to `%x`, so its visible date follows
+`LC_TIME`. If geolocation fails, it keeps the prior date locale. Set
 `DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
 `DATE_LOCALE=keep` to preserve the current date locale.

@@ -37,7 +37,7 @@ for apt_file in /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/go
 done
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps
 
 # Use the server's public IPv4 address, not its private interface address.
 PUBLIC_IP=$(curl -4fsSL --max-time 8 https://api.ipify.org 2>/dev/null || true)
@@ -315,6 +315,27 @@ StartupNotify=true
 DESKTOP
 chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
 chmod 755 "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
+
+# XFCE's clock has its own fixed date format by default. %x delegates to the
+# session's LC_TIME so the panel follows the detected regional date format.
+PANEL_BUS=
+for attempt in {1..15}; do
+    PANEL_PID=$(pgrep -u "$DESKTOP_USER" -x xfce4-panel | head -n 1 || true)
+    if [[ -n $PANEL_PID ]]; then
+        PANEL_BUS=$(tr '\0' '\n' < "/proc/$PANEL_PID/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+        [[ -z $PANEL_BUS ]] || break
+    fi
+    sleep 1
+done
+[[ -n $PANEL_BUS ]] || die 'XFCE panel session bus is unavailable.'
+XFCONF=(runuser -u "$DESKTOP_USER" -- env DISPLAY="$VNC_DISPLAY" DBUS_SESSION_BUS_ADDRESS="$PANEL_BUS" xfconf-query -c xfce4-panel)
+CLOCK_PLUGINS=$("${XFCONF[@]}" -lv | awk '$2 == "clock" && $1 ~ /^\/plugins\/plugin-[0-9]+$/ {print $1}')
+if [[ -n $CLOCK_PLUGINS ]]; then
+    while IFS= read -r clock_plugin; do
+        "${XFCONF[@]}" -p "$clock_plugin/digital-date-format" -n -t string -s '%x'
+    done <<< "$CLOCK_PLUGINS"
+    log "XFCE clock date format follows $SELECTED_DATE_LOCALE"
+fi
 
 for attempt in {1..15}; do
     ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' && break
