@@ -10,6 +10,7 @@ INSTALL_DOCKER=${INSTALL_DOCKER:-0}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
 VNC_DISPLAY=:1
 VNC_PORT=5901
+VNC_GEOMETRY=${VNC_GEOMETRY:-1680x1050}
 CREDENTIALS_FILE=/root/.config/debian12-init/credentials
 WORK_DIR=
 
@@ -25,6 +26,7 @@ trap cleanup EXIT
 [[ $PANEL_PORT =~ ^[0-9]{2,5}$ ]] && (( PANEL_PORT >= 1024 && PANEL_PORT <= 65535 )) || die 'Invalid PANEL_PORT.'
 [[ $PANEL_PORT -ne $VNC_PORT ]] || die 'PANEL_PORT conflicts with VNC.'
 [[ $INSTALL_DOCKER == 0 || $INSTALL_DOCKER == 1 ]] || die 'INSTALL_DOCKER must be 0 or 1.'
+[[ $VNC_GEOMETRY =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die 'Invalid VNC_GEOMETRY (expected WIDTHxHEIGHT).'
 
 export DEBIAN_FRONTEND=noninteractive
 # Repair permissions from an interrupted earlier run before apt reads the repo.
@@ -103,7 +105,9 @@ else
     log '1Panel already installed; keeping its current settings'
     [[ -e $CREDENTIALS_FILE ]] || die 'Existing 1Panel credentials are unknown; cannot print its password.'
 fi
-systemctl is-active --quiet 1panel || die '1Panel service is not active.'
+systemctl enable --now 1panel.service
+systemctl is-active --quiet 1panel.service || die '1Panel service is not active.'
+systemctl is-enabled --quiet 1panel.service || die '1Panel service is not enabled at boot.'
 # Save them as soon as the panel succeeds so an interrupted install can resume.
 # Rewriting also removes any VNC password saved by an older script revision.
 install -d -m 700 /root/.config/debian12-init
@@ -114,7 +118,13 @@ chmod 600 "$CREDENTIALS_FILE"
 log 'Installing the minimal XFCE session and TigerVNC'
 apt-get install -y --no-install-recommends \
     xfce4-session xfce4-panel xfdesktop4 xfwm4 xfce4-terminal thunar \
-    dbus-x11 tigervnc-standalone-server fonts-dejavu-core
+    dbus-x11 tigervnc-standalone-server fonts-dejavu-core fonts-wqy-microhei locales
+
+if ! locale -a | grep -qi '^zh_CN\.utf8$'; then
+    sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
+    grep -q '^zh_CN.UTF-8 UTF-8$' /etc/locale.gen || printf 'zh_CN.UTF-8 UTF-8\n' >> /etc/locale.gen
+    locale-gen zh_CN.UTF-8
+fi
 
 if ! id "$DESKTOP_USER" >/dev/null 2>&1; then
     useradd --create-home --shell /bin/bash "$DESKTOP_USER"
@@ -146,7 +156,9 @@ User=$DESKTOP_USER
 Group=$DESKTOP_USER
 WorkingDirectory=$DESKTOP_HOME
 Environment=HOME=$DESKTOP_HOME
-ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry 1280x720 -depth 24 -SecurityTypes None
+Environment=LANG=zh_CN.UTF-8
+Environment=LANGUAGE=zh_CN:zh
+ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry $VNC_GEOMETRY -depth 24 -SecurityTypes None
 ExecStop=-/usr/bin/tigervncserver -kill $VNC_DISPLAY
 Restart=on-failure
 RestartSec=5
@@ -158,6 +170,7 @@ systemctl daemon-reload
 systemctl enable tigervnc-desktop.service
 systemctl restart tigervnc-desktop.service
 systemctl is-active --quiet tigervnc-desktop.service || die 'TigerVNC service is not active.'
+systemctl is-enabled --quiet tigervnc-desktop.service || die 'TigerVNC service is not enabled at boot.'
 
 log 'Installing Google Chrome from the official apt repository'
 curl -fsSL --retry 3 https://dl.google.com/linux/linux_signing_key.pub | gpg --batch --yes --dearmor -o /usr/share/keyrings/google-chrome.gpg

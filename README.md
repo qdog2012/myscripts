@@ -24,6 +24,11 @@ computer, create an SSH tunnel and then connect a VNC viewer to
 ssh -L 5901:127.0.0.1:5901 root@YOUR_SERVER
 ```
 
+The XFCE session uses `zh_CN.UTF-8` and the lightweight WenQuanYi Micro Hei
+font for Chinese text. Its default resolution is `1680x1050`; set
+`VNC_GEOMETRY=WIDTHxHEIGHT` before running to change it. The 1Panel and VNC
+systemd services are enabled at boot.
+
 If the cloud firewall blocks direct access to the 1Panel port, use a tunnel:
 
 ```bash
