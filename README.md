@@ -63,3 +63,17 @@ Chinese. It also sets the XFCE panel clock to `%x`, so its visible date follows
 `LC_TIME`. If geolocation fails, it keeps the prior date locale. Set
 `DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
 `DATE_LOCALE=keep` to preserve the current date locale.
+
+## Ubuntu 24.04 Docker installation
+
+For a standalone Docker installation on Ubuntu 24.04 (amd64 or arm64), run:
+
+```bash
+sudo bash ubuntu24-install-docker.sh
+```
+
+`ubuntu24-install-docker.sh` installs Docker Engine, containerd, Buildx, and
+the Compose plugin from Docker's signed apt repository. It enables Docker at
+boot and verifies the daemon and plugins. It can be rerun. It stops with an
+error if conflicting distro Docker/containerd packages are installed, so an
+existing deployment is not replaced implicitly.
