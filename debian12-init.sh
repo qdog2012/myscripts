@@ -242,14 +242,23 @@ if [[ $INSTALL_OPENRESTY == 1 ]]; then
     log 'Installing OpenResty through the 1Panel app store'
     [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
     install -d -m 755 "$STREAM_CONFIG_DIR"
-    STREAM_CONFIG_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tls-forward-443.conf"
-    if [[ ! -f $STREAM_CONFIG_SOURCE ]]; then
-        STREAM_CONFIG_SOURCE="$WORK_DIR/tls-forward-443.conf"
-        curl -fsSL --retry 3 -o "$STREAM_CONFIG_SOURCE" \
-            https://raw.githubusercontent.com/qdog2012/myscripts/main/tls-forward-443.conf
+    STREAM_CONFIG_TARGET="$STREAM_CONFIG_DIR/tls-forward-443.conf"
+    if [[ -f $STREAM_CONFIG_TARGET ]]; then
+        # Keep custom SNI mappings on reruns while widening the old listener.
+        sed -i -e 's/\r$//' \
+            -e 's/listen 127\.0\.0\.1:443;/listen 0.0.0.0:443;/' \
+            -e 's/# Local-only listener for frpc stcp on the overseas server\./# Accept TLS connections on every IPv4 interface./' \
+            "$STREAM_CONFIG_TARGET"
+    else
+        STREAM_CONFIG_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tls-forward-443.conf"
+        if [[ ! -f $STREAM_CONFIG_SOURCE ]]; then
+            STREAM_CONFIG_SOURCE="$WORK_DIR/tls-forward-443.conf"
+            curl -fsSL --retry 3 -o "$STREAM_CONFIG_SOURCE" \
+                https://raw.githubusercontent.com/qdog2012/myscripts/main/tls-forward-443.conf
+        fi
+        install -m 644 "$STREAM_CONFIG_SOURCE" "$STREAM_CONFIG_TARGET"
+        sed -i 's/\r$//' "$STREAM_CONFIG_TARGET"
     fi
-    install -m 644 "$STREAM_CONFIG_SOURCE" "$STREAM_CONFIG_DIR/tls-forward-443.conf"
-    sed -i 's/\r$//' "$STREAM_CONFIG_DIR/tls-forward-443.conf"
     cat > "$WORK_DIR/install-openresty.py" <<'PYTHON'
 import base64
 import http.cookiejar
@@ -437,6 +446,29 @@ while True:
         raise RuntimeError(f'OpenResty nginx -t failed: {check.stderr}')
     time.sleep(3)
 subprocess.run(['docker', 'exec', container_name, 'nginx', '-s', 'reload'], check=True)
+
+
+def public_443_listening():
+    sockets = subprocess.run(['ss', '-ltnH'], text=True, capture_output=True,
+                             check=True).stdout
+    return any(re.search(r'\s0\.0\.0\.0:443\s', line)
+               for line in sockets.splitlines())
+
+
+time.sleep(2)
+if not public_443_listening():
+    # nginx cannot replace an existing 127.0.0.1:443 socket with the wider
+    # 0.0.0.0:443 socket during a graceful reload.
+    print('Restarting OpenResty to apply the public TLS listener', flush=True)
+    subprocess.run(['docker', 'restart', container_name], check=True,
+                   stdout=subprocess.DEVNULL)
+    deadline = time.monotonic() + 180
+    while not public_443_listening():
+        if time.monotonic() > deadline:
+            raise RuntimeError('OpenResty did not listen on public port 443 after restart')
+        time.sleep(3)
+    subprocess.run(['docker', 'exec', container_name, 'nginx', '-t'], check=True)
+
 deadline = time.monotonic() + 180
 while True:
     current = installed()
@@ -455,7 +487,7 @@ PYTHON
     python3 "$WORK_DIR/install-openresty.py"
     docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$(cat "$OPENRESTY_CONTAINER_FILE")" | grep -Eq '^(always|unless-stopped)$' || die 'OpenResty container has no boot restart policy.'
     ss -ltn | grep -qE ':18443[[:space:]]' || die 'OpenResty HTTPS is not listening on port 18443.'
-    ss -ltn | grep -qE '127\.0\.0\.1:443[[:space:]]' || die 'OpenResty TLS stream is not listening on 127.0.0.1:443.'
+    ss -ltn | grep -qE '0\.0\.0\.0:443[[:space:]]' || die 'OpenResty TLS stream is not listening on public IPv4 port 443.'
 fi
 
 log 'Installing the minimal XFCE session and TigerVNC'

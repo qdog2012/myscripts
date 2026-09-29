@@ -30,9 +30,12 @@ installs Docker and OpenResty if they are missing. New 1Panel installations live
 HTTP on `80` and HTTPS on `18443`. The script places
 `tls-forward-443.conf` in `/serverdata/1panel/www/stream.d`, mounts that
 directory into OpenResty, and loads it in a `stream` block. Its TLS stream
-listener binds only to `127.0.0.1:443`; unknown SNI names forward to
+listener binds to every IPv4 interface on port `443`; allow inbound TCP `443`
+in the cloud security group for public access. Unknown SNI names forward to
 `127.0.0.1:18443`. Docker and the OpenResty container start automatically
 after a reboot.
+Rerunning the script preserves custom SNI mappings in the installed stream
+configuration while upgrading an old loopback-only 443 listener to public IPv4.
 The default OpenResty HTTPS site has no certificate; configure a site and
 certificate in 1Panel before expecting direct HTTPS requests to succeed.
 
