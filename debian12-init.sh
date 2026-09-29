@@ -6,6 +6,10 @@ umask 077
 PANEL_VERSION=v1.10.34-lts
 PANEL_PORT=${PANEL_PORT:-8080}
 PANEL_ENTRANCE=admin
+PANEL_BASE_DIR=/serverdata
+PANEL_DATA_DIR=$PANEL_BASE_DIR/1panel
+OPENRESTY_HTTPS_PORT=18443
+STREAM_CONFIG_DIR=$PANEL_DATA_DIR/www/stream.d
 INSTALL_DOCKER=${INSTALL_DOCKER:-1}
 INSTALL_OPENRESTY=${INSTALL_OPENRESTY:-$INSTALL_DOCKER}
 SERVER_TIMEZONE=${SERVER_TIMEZONE:-auto}
@@ -112,6 +116,9 @@ else
 fi
 
 if ! command -v 1pctl >/dev/null 2>&1; then
+    if [[ -d $PANEL_DATA_DIR ]] && [[ -n $(find "$PANEL_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+        die "$PANEL_DATA_DIR is not empty; the upstream installer would erase its contents."
+    fi
     log "Installing 1Panel $PANEL_VERSION"
     WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
     PACKAGE="1panel-${PANEL_VERSION}-linux-amd64.tar.gz"
@@ -138,7 +145,7 @@ set timeout 1800
 log_user 1
 spawn bash ./install.sh
 expect {
-    -re {Set 1Panel installation directory.*: $} { send "\r"; exp_continue }
+    -re {Set 1Panel installation directory.*: $} { send "$env(PANEL_BASE_DIR)\r"; exp_continue }
     -re {Do you want to configure image acceleration.*: $} { send "n\r"; exp_continue }
     -re {A lower version of Docker Compose was detected.*: $} { send "y\r"; exp_continue }
     -re {Set 1Panel port.*: $} { send "$env(PANEL_PORT)\r"; exp_continue }
@@ -151,10 +158,12 @@ expect {
 set result [wait]
 exit [lindex $result 3]
 EXPECT
-    (cd "$PANEL_DIR" && export PANEL_PORT PANEL_USER PANEL_PASSWORD && expect "$WORK_DIR/install-1panel.exp")
+    (cd "$PANEL_DIR" && export PANEL_BASE_DIR PANEL_PORT PANEL_USER PANEL_PASSWORD && expect "$WORK_DIR/install-1panel.exp")
 else
     log '1Panel already installed; keeping its current settings'
     [[ -e $CREDENTIALS_FILE ]] || die 'Existing 1Panel credentials are unknown; cannot print its password.'
+    CURRENT_PANEL_BASE=$(sed -n 's/^BASE_DIR=//p' "$(command -v 1pctl)" | head -n 1)
+    [[ $CURRENT_PANEL_BASE == "$PANEL_BASE_DIR" ]] || die "Existing 1Panel base is $CURRENT_PANEL_BASE; expected $PANEL_BASE_DIR. Migrate it before rerunning."
 fi
 systemctl enable --now 1panel.service
 systemctl is-active --quiet 1panel.service || die '1Panel service is not active.'
@@ -199,12 +208,24 @@ fi
 if [[ $INSTALL_OPENRESTY == 1 ]]; then
     log 'Installing OpenResty through the 1Panel app store'
     [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    install -d -m 755 "$STREAM_CONFIG_DIR"
+    STREAM_CONFIG_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tls-forward-443.conf"
+    if [[ ! -f $STREAM_CONFIG_SOURCE ]]; then
+        STREAM_CONFIG_SOURCE="$WORK_DIR/tls-forward-443.conf"
+        curl -fsSL --retry 3 -o "$STREAM_CONFIG_SOURCE" \
+            https://raw.githubusercontent.com/qdog2012/myscripts/main/tls-forward-443.conf
+    fi
+    install -m 644 "$STREAM_CONFIG_SOURCE" "$STREAM_CONFIG_DIR/tls-forward-443.conf"
+    sed -i 's/\r$//' "$STREAM_CONFIG_DIR/tls-forward-443.conf"
     cat > "$WORK_DIR/install-openresty.py" <<'PYTHON'
 import base64
 import http.cookiejar
 import json
 import os
+from pathlib import Path
+import re
 import secrets
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -217,6 +238,9 @@ from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 port = os.environ['PANEL_PORT']
 base = f'http://127.0.0.1:{port}'
+https_port = int(os.environ['OPENRESTY_HTTPS_PORT'])
+panel_data_dir = Path(os.environ['PANEL_DATA_DIR'])
+stream_dir = Path(os.environ['STREAM_CONFIG_DIR'])
 jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
@@ -282,6 +306,7 @@ if not current.get('isExist'):
         raise RuntimeError('1Panel reports that OpenResty is unavailable on this server')
     params = {field['envKey']: field.get('default', '')
               for field in detail['params'].get('formFields', [])}
+    params['PANEL_APP_PORT_HTTPS'] = https_port
     request('POST', '/api/v1/apps/install', {
         'appDetailId': detail['id'], 'name': 'openresty', 'params': params,
         'advanced': False, 'allowPort': True, 'pullImage': True,
@@ -299,20 +324,105 @@ while True:
     current = installed()
     status = current.get('status', '').lower()
     if status == 'running':
-        with open(os.environ['OPENRESTY_CONTAINER_FILE'], 'w', encoding='utf-8') as container_file:
-            container_file.write(current['containerName'])
-        print(f'1Panel OpenResty is running on HTTP {current.get("httpPort")} / HTTPS {current.get("httpsPort")}', flush=True)
         break
     if 'error' in status or status in {'uperr', 'installerr'}:
         raise RuntimeError(f'OpenResty installation failed: {current}')
     if time.monotonic() > deadline:
         raise RuntimeError(f'OpenResty did not reach running state within 20 minutes: {current}')
     time.sleep(10)
+
+install_path = Path(current['installPath'])
+expected_path = panel_data_dir / 'apps/openresty/openresty'
+if install_path != expected_path:
+    raise RuntimeError(f'OpenResty is installed at {install_path}; expected {expected_path}')
+
+config = request('GET', f'/api/v1/apps/installed/params/{current["appInstallId"]}')
+params = {entry['key']: entry['value'] for entry in config['params']}
+params['PANEL_APP_PORT_HTTPS'] = https_port
+compose = config['dockerCompose']
+mount = f'{stream_dir}:/usr/local/openresty/nginx/conf/stream.d:ro'
+compose_changed = mount not in compose
+if compose_changed:
+    match = re.search(r'(?m)^([ \t]*- )\./www:/www[ \t]*$', compose)
+    if not match:
+        raise RuntimeError('OpenResty Compose file has no expected ./www:/www volume')
+    compose = compose[:match.end()] + '\n' + match.group(1) + mount + compose[match.end():]
+
+nginx_conf = install_path / 'conf/nginx.conf'
+nginx_text = nginx_conf.read_text()
+stream_include = 'include /usr/local/openresty/nginx/conf/stream.d/*.conf;'
+nginx_changed = stream_include not in nginx_text
+if nginx_changed:
+    if re.search(r'(?m)^\s*stream\s*\{', nginx_text):
+        raise RuntimeError('OpenResty already has a stream block; add the stream.d include there')
+    nginx_text = nginx_text.rstrip() + f'\n\nstream {{\n    {stream_include}\n}}\n'
+
+default_conf = install_path / 'conf/conf.d/00.default.conf'
+default_text = default_conf.read_text()
+default_new = re.sub(r'(?m)^([ \t]*listen[ \t]+)443([ \t]+ssl\b)',
+                     lambda match: match.group(1) + str(https_port) + match.group(2),
+                     default_text)
+if not re.search(rf'(?m)^\s*listen\s+{https_port}\s+ssl\b', default_new):
+    raise RuntimeError('OpenResty default HTTPS listener was not found')
+
+if nginx_changed:
+    nginx_conf.write_text(nginx_text)
+if default_new != default_text:
+    default_conf.write_text(default_new)
+
+if compose_changed or current['httpsPort'] != https_port:
+    update = {key: config[key] for key in (
+        'cpuQuota', 'memoryLimit', 'memoryUnit', 'containerName',
+        'allowPort', 'hostMode', 'gpuConfig') if key in config}
+    update.update({'installId': current['appInstallId'], 'params': params,
+                   'advanced': True, 'editCompose': True, 'dockerCompose': compose})
+    request('POST', '/api/v1/apps/installed/params/update', update)
+
+container_name = current['containerName']
+deadline = time.monotonic() + 180
+while True:
+    inspect = subprocess.run(
+        ['docker', 'inspect', '--format', '{{json .Mounts}}', container_name],
+        text=True, capture_output=True)
+    if inspect.returncode == 0:
+        mounts = json.loads(inspect.stdout)
+        if any(m.get('Source') == str(stream_dir) and
+               m.get('Destination') == '/usr/local/openresty/nginx/conf/stream.d'
+               for m in mounts):
+            break
+    if time.monotonic() > deadline:
+        raise RuntimeError('OpenResty stream.d mount did not appear within 3 minutes')
+    time.sleep(3)
+
+deadline = time.monotonic() + 180
+while True:
+    check = subprocess.run(['docker', 'exec', container_name, 'nginx', '-t'],
+                           text=True, capture_output=True)
+    if check.returncode == 0:
+        break
+    if 'is not running' not in check.stderr or time.monotonic() > deadline:
+        raise RuntimeError(f'OpenResty nginx -t failed: {check.stderr}')
+    time.sleep(3)
+subprocess.run(['docker', 'exec', container_name, 'nginx', '-s', 'reload'], check=True)
+deadline = time.monotonic() + 180
+while True:
+    current = installed()
+    if current.get('httpsPort') == https_port and current.get('status') == 'Running':
+        break
+    if time.monotonic() > deadline:
+        raise RuntimeError(f'OpenResty did not reach HTTPS {https_port}: {current}')
+    time.sleep(3)
+with open(os.environ['OPENRESTY_CONTAINER_FILE'], 'w', encoding='utf-8') as container_file:
+    container_file.write(container_name)
+print(f'1Panel OpenResty is running on HTTP {current.get("httpPort")} / HTTPS {https_port}; stream config: {stream_dir / "tls-forward-443.conf"}', flush=True)
 PYTHON
     OPENRESTY_CONTAINER_FILE="$WORK_DIR/openresty-container"
     export PANEL_PORT PANEL_USER PANEL_PASSWORD OPENRESTY_CONTAINER_FILE
+    export PANEL_DATA_DIR OPENRESTY_HTTPS_PORT STREAM_CONFIG_DIR
     python3 "$WORK_DIR/install-openresty.py"
     docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$(cat "$OPENRESTY_CONTAINER_FILE")" | grep -Eq '^(always|unless-stopped)$' || die 'OpenResty container has no boot restart policy.'
+    ss -ltn | grep -qE ':18443[[:space:]]' || die 'OpenResty HTTPS is not listening on port 18443.'
+    ss -ltn | grep -qE '127\.0\.0\.1:443[[:space:]]' || die 'OpenResty TLS stream is not listening on 127.0.0.1:443.'
 fi
 
 log 'Installing the minimal XFCE session and TigerVNC'
@@ -518,10 +628,14 @@ PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org |
 printf '\n===== Setup complete =====\n'
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
 printf 'Date locale: %s\n' "$SELECTED_DATE_LOCALE"
+printf '1Panel directory: %s\n' "$PANEL_DATA_DIR"
 printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel tunnel: ssh -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$PANEL_PORT" "$PANEL_PORT"
 printf '1Panel URL via tunnel: http://127.0.0.1:%s/%s\n' "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel account: %s\n1Panel password: %s\n' "$PANEL_USER" "$PANEL_PASSWORD"
+if [[ $INSTALL_OPENRESTY == 1 ]]; then
+    printf 'OpenResty HTTPS: %s\nTLS stream config: %s\n' "$OPENRESTY_HTTPS_PORT" "$STREAM_CONFIG_DIR/tls-forward-443.conf"
+fi
 printf 'Desktop user: %s\nVNC authentication: none (loopback only)\n' "$DESKTOP_USER"
 printf 'VNC tunnel: ssh -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n'
 printf 'VNC viewer: 127.0.0.1:5901\n'

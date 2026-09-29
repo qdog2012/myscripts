@@ -18,10 +18,18 @@ default 1Panel port is `8080` and its account is `admin`; set `PANEL_PORT` to
 choose another port. The default desktop user is `desktop`; set `DESKTOP_USER`
 to change it. Docker and OpenResty are installed by default. Set
 `INSTALL_DOCKER=0` to skip both, or `INSTALL_OPENRESTY=0` to keep Docker without
-OpenResty. On a rerun, the script also installs Docker and OpenResty if 1Panel
-already exists but they are missing. OpenResty uses ports `80` and `443` and
-appears under 1Panel's installed apps. Docker and the OpenResty container start
-automatically after a reboot.
+OpenResty. On a rerun of a matching 1Panel installation, the script also
+installs Docker and OpenResty if they are missing. New 1Panel installations live in
+`/serverdata/1panel`. OpenResty appears under 1Panel's installed apps, with
+HTTP on `80` and HTTPS on `18443`. The script places
+`tls-forward-443.conf` in `/serverdata/1panel/www/stream.d`, mounts that
+directory into OpenResty, and loads it in a `stream` block. Its TLS stream
+listener binds only to `127.0.0.1:443`; unknown SNI names forward to
+`127.0.0.1:18443`. Docker and the OpenResty container start automatically
+after a reboot.
+
+An existing 1Panel installation at another base directory must be migrated
+before rerunning this script; the script does not move its application data.
 
 TigerVNC has no password and listens only on `127.0.0.1:5901`. From your own
 computer, create an SSH tunnel and then connect a VNC viewer to
