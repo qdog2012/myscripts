@@ -602,6 +602,26 @@ chmod 644 /etc/opt/chrome/policies/managed/10-on-device-ai.json
 cat > /usr/local/bin/chrome-low-resource <<'CHROME'
 #!/bin/sh
 # Keep background work and renderer fan-out small; preserve Chrome's sandbox.
+# Chrome treats a lock from an old host name as another machine using the
+# profile. Clear stale symlinks only when this user has no Chrome process.
+profile_dir=${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome
+lock_file=$profile_dir/SingletonLock
+if [ -L "$lock_file" ]; then
+    lock_owner=$(readlink -- "$lock_file")
+    lock_pid=${lock_owner##*-}
+    case "$lock_pid" in
+        ''|*[!0-9]*) ;;
+        *)
+            lock_host=${lock_owner%-$lock_pid}
+            if [ "$lock_host" != "$(hostname)" ] &&
+               ! pgrep -u "$(id -u)" -x chrome >/dev/null 2>&1; then
+                for name in SingletonLock SingletonCookie SingletonSocket; do
+                    [ ! -L "$profile_dir/$name" ] || rm -f -- "$profile_dir/$name"
+                done
+            fi
+            ;;
+    esac
+fi
 exec /usr/bin/google-chrome-stable \
     --no-first-run \
     --no-default-browser-check \

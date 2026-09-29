@@ -71,6 +71,8 @@ disables Chrome's on-device AI model through the managed
 `GenAILocalFoundationalModelSettings` policy. This keeps the setting off for all
 Chrome profiles and shows it as managed in Chrome settings. For
 machines with less than 2 GiB RAM and no active swap, it adds a 2 GiB swap file.
+The desktop Chrome launcher clears stale profile locks left by a server host-name
+change when no Chrome process is running.
 
 The system time zone is detected from the server's public IPv4 address using
 IP geolocation. An unsuccessful lookup leaves the existing time zone unchanged.
