@@ -62,6 +62,23 @@ log 'Installing base utilities'
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography
 
+log 'Disabling Alibaba Cloud agents when installed'
+CLOUD_AGENT_WARNINGS=()
+for agent in cloudmonitor aegis aliyun; do
+    unit="$agent.service"
+    if [[ $(systemctl show -p LoadState --value "$unit") == loaded ]]; then
+        if ! systemctl disable --now "$unit"; then
+            CLOUD_AGENT_WARNINGS+=("$unit")
+            log "WARNING: $unit refused to disable; check the provider's agent protection settings"
+        elif systemctl is-enabled --quiet "$unit" || systemctl is-active --quiet "$unit"; then
+            CLOUD_AGENT_WARNINGS+=("$unit")
+            log "WARNING: $unit is still enabled or active"
+        else
+            log "$unit disabled and stopped"
+        fi
+    fi
+done
+
 if ! grep -Fq '# debian12-init interactive aliases' /etc/bash.bashrc; then
     cat >> /etc/bash.bashrc <<'ALIASES'
 
@@ -660,4 +677,7 @@ fi
 printf 'Desktop user: %s\nVNC authentication: none (loopback only)\n' "$DESKTOP_USER"
 printf 'VNC tunnel: ssh -p %s -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n' "$SSH_TUNNEL_PORT"
 printf 'VNC viewer: 127.0.0.1:5901\n'
+if ((${#CLOUD_AGENT_WARNINGS[@]})); then
+    printf 'Cloud agents requiring manual disable: %s\n' "${CLOUD_AGENT_WARNINGS[*]}"
+fi
 printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
