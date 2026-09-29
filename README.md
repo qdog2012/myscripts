@@ -11,10 +11,10 @@ curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-i
 bash debian12-init.sh
 ```
 
-If present, the script stops and disables the Alibaba Cloud `cloudmonitor`,
-`aegis`, and `aliyun` services. This also disables their cloud monitoring,
-Security Center, and remote-assistance features. If an agent's protection
-prevents disabling it, the script reports that service for manual action and
+If present, the script stops and disables the Alibaba Cloud `cloudmonitor` and
+`aliyun` services. This also disables their cloud monitoring and remote-assistance
+features. Aegis is left to manual management through the Alibaba Cloud console.
+If an agent refuses to disable, the script reports it for manual action and
 continues the rest of the setup.
 
 The script prints the 1Panel URL (`/admin`), 1Panel account/password, and desktop

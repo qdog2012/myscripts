@@ -64,7 +64,7 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl ex
 
 log 'Disabling Alibaba Cloud agents when installed'
 CLOUD_AGENT_WARNINGS=()
-for agent in cloudmonitor aegis aliyun; do
+for agent in cloudmonitor aliyun; do
     unit="$agent.service"
     if [[ $(systemctl show -p LoadState --value "$unit") == loaded ]]; then
         if ! systemctl disable --now "$unit"; then
