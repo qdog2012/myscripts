@@ -27,6 +27,8 @@ directory into OpenResty, and loads it in a `stream` block. Its TLS stream
 listener binds only to `127.0.0.1:443`; unknown SNI names forward to
 `127.0.0.1:18443`. Docker and the OpenResty container start automatically
 after a reboot.
+The default OpenResty HTTPS site has no certificate; configure a site and
+certificate in 1Panel before expecting direct HTTPS requests to succeed.
 
 An existing 1Panel installation at another base directory must be migrated
 before rerunning this script; the script does not move its application data.
@@ -38,6 +40,10 @@ computer, create an SSH tunnel and then connect a VNC viewer to
 ```bash
 ssh -L 5901:127.0.0.1:5901 root@YOUR_SERVER
 ```
+
+If SSH uses a custom port, add `-p PORT` to the tunnel command. The setup
+script detects the port of its SSH session when printing tunnel examples;
+set `SSH_TUNNEL_PORT` when running from a local console.
 
 The XFCE session uses `zh_CN.UTF-8` and the lightweight WenQuanYi Micro Hei
 font for Chinese text. Its default resolution is `1680x1050`; set

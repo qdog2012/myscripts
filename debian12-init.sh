@@ -26,6 +26,19 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 cleanup() { if [[ -n $WORK_DIR && -d $WORK_DIR ]]; then rm -rf -- "$WORK_DIR"; fi; }
 trap cleanup EXIT
 
+ensure_chrome_key() {
+    if [[ -s /usr/share/keyrings/google-chrome.gpg ]] &&
+       gpg --batch --quiet --show-keys /usr/share/keyrings/google-chrome.gpg >/dev/null 2>&1; then
+        return
+    fi
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    curl -4 --http1.1 -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+        -o "$WORK_DIR/google-linux-signing-key.pub" \
+        https://dl.google.com/linux/linux_signing_key.pub
+    gpg --batch --yes --dearmor -o "$WORK_DIR/google-chrome.gpg" "$WORK_DIR/google-linux-signing-key.pub"
+    install -m 644 "$WORK_DIR/google-chrome.gpg" /usr/share/keyrings/google-chrome.gpg
+}
+
 [[ $EUID -eq 0 ]] || die 'Run this script as root.'
 [[ $(. /etc/os-release; printf '%s' "$ID:$VERSION_ID") == debian:12 ]] || die 'Debian 12 is required.'
 [[ $(uname -m) == x86_64 ]] || die 'This script currently supports x86_64 only (Chrome amd64 package).'
@@ -42,6 +55,9 @@ export DEBIAN_FRONTEND=noninteractive
 for apt_file in /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/google-chrome.list; do
     [[ ! -e $apt_file ]] || chmod 644 "$apt_file"
 done
+if [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+    ensure_chrome_key
+fi
 log 'Installing base utilities'
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography
@@ -554,7 +570,7 @@ systemctl is-active --quiet tigervnc-desktop.service || die 'TigerVNC service is
 systemctl is-enabled --quiet tigervnc-desktop.service || die 'TigerVNC service is not enabled at boot.'
 
 log 'Installing Google Chrome from the official apt repository'
-curl -fsSL --retry 3 https://dl.google.com/linux/linux_signing_key.pub | gpg --batch --yes --dearmor -o /usr/share/keyrings/google-chrome.gpg
+ensure_chrome_key
 printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' > /etc/apt/sources.list.d/google-chrome.list
 chmod 644 /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/google-chrome.list
 apt-get update
@@ -625,18 +641,23 @@ for attempt in {1..15}; do
 done
 ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
 PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')}
+# An SSH session exposes the server port as the last SSH_CONNECTION field.
+# SSH_TUNNEL_PORT can override it when the script runs from a local console.
+SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT:-${SSH_CONNECTION:-}}
+SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT##* }
+[[ $SSH_TUNNEL_PORT =~ ^[0-9]{1,5}$ ]] || SSH_TUNNEL_PORT=22
 printf '\n===== Setup complete =====\n'
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
 printf 'Date locale: %s\n' "$SELECTED_DATE_LOCALE"
 printf '1Panel directory: %s\n' "$PANEL_DATA_DIR"
 printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_ENTRANCE"
-printf '1Panel tunnel: ssh -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$PANEL_PORT" "$PANEL_PORT"
+printf '1Panel tunnel: ssh -p %s -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$SSH_TUNNEL_PORT" "$PANEL_PORT" "$PANEL_PORT"
 printf '1Panel URL via tunnel: http://127.0.0.1:%s/%s\n' "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel account: %s\n1Panel password: %s\n' "$PANEL_USER" "$PANEL_PASSWORD"
 if [[ $INSTALL_OPENRESTY == 1 ]]; then
     printf 'OpenResty HTTPS: %s\nTLS stream config: %s\n' "$OPENRESTY_HTTPS_PORT" "$STREAM_CONFIG_DIR/tls-forward-443.conf"
 fi
 printf 'Desktop user: %s\nVNC authentication: none (loopback only)\n' "$DESKTOP_USER"
-printf 'VNC tunnel: ssh -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n'
+printf 'VNC tunnel: ssh -p %s -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n' "$SSH_TUNNEL_PORT"
 printf 'VNC viewer: 127.0.0.1:5901\n'
 printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
