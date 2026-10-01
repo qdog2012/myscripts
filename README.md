@@ -89,6 +89,14 @@ Chinese. It also sets the XFCE panel clock to `%x`, so its visible date follows
 `DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
 `DATE_LOCALE=keep` to preserve the current date locale.
 
+## FRP tunnel through an internal server
+
+For a persistent FRP STCP tunnel from a separate internal Linux server to the
+existing OpenResty HTTPS listener, see [frp-tunnel.md](frp-tunnel.md).
+The optional `install-frp-tunnel.sh` and `install-frp-visitor.sh` installers create
+systemd services, verify release checksums, and enable certificate validation.
+They are separate from the default Debian initialization script.
+
 ## Ubuntu 24.04 Docker installation
 
 For a standalone Docker installation on Ubuntu 24.04 (amd64 or arm64), run:
