@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian 12: 1Panel, Docker, OpenResty, XFCE, Chrome, and loopback-only TigerVNC.
+# Debian 12: 1Panel, Docker, OpenResty, Node.js, XFCE, Chrome, and loopback-only TigerVNC.
 set -Eeuo pipefail
 umask 077
 
@@ -8,6 +8,11 @@ PANEL_PORT=${PANEL_PORT:-8080}
 PANEL_ENTRANCE=admin
 PANEL_BASE_DIR=/serverdata
 PANEL_DATA_DIR=$PANEL_BASE_DIR/1panel
+NODE_VERSION=v24.21.0
+NODE_INSTALL_DIR=$PANEL_BASE_DIR/node
+NODE_BASHRC_FILE=/etc/bash.bashrc
+NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+NODE_STAGE_DIR=
 OPENRESTY_HTTPS_PORT=18443
 STREAM_CONFIG_DIR=$PANEL_DATA_DIR/www/stream.d
 INSTALL_DOCKER=${INSTALL_DOCKER:-1}
@@ -23,7 +28,10 @@ WORK_DIR=
 
 log() { printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-cleanup() { if [[ -n $WORK_DIR && -d $WORK_DIR ]]; then rm -rf -- "$WORK_DIR"; fi; }
+cleanup() {
+    if [[ -n $WORK_DIR && -d $WORK_DIR ]]; then rm -rf -- "$WORK_DIR"; fi
+    if [[ -n $NODE_STAGE_DIR && -d $NODE_STAGE_DIR ]]; then rm -rf -- "$NODE_STAGE_DIR"; fi
+}
 trap cleanup EXIT
 
 ensure_chrome_key() {
@@ -37,6 +45,51 @@ ensure_chrome_key() {
         https://dl.google.com/linux/linux_signing_key.pub
     gpg --batch --yes --dearmor -o "$WORK_DIR/google-chrome.gpg" "$WORK_DIR/google-linux-signing-key.pub"
     install -m 644 "$WORK_DIR/google-chrome.gpg" /usr/share/keyrings/google-chrome.gpg
+}
+
+install_node() {
+    local package="node-${NODE_VERSION}-linux-x64.tar.xz" staged_node backup_dir= path_line
+    if [[ -x $NODE_INSTALL_DIR/bin/node ]] &&
+       [[ $("$NODE_INSTALL_DIR/bin/node" --version 2>/dev/null) == "$NODE_VERSION" ]]; then
+        log "Keeping existing Node.js $NODE_VERSION at $NODE_INSTALL_DIR"
+    else
+        log "Installing Node.js $NODE_VERSION"
+        [[ -d $PANEL_BASE_DIR ]] || install -d -m 755 "$PANEL_BASE_DIR"
+        NODE_STAGE_DIR=$(mktemp -d "$PANEL_BASE_DIR/.node-install.XXXXXXXX")
+        curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+            -o "$NODE_STAGE_DIR/$package" "https://nodejs.org/dist/$NODE_VERSION/$package"
+        printf '%s  %s\n' "$NODE_SHA256" "$NODE_STAGE_DIR/$package" | sha256sum --check --status ||
+            die 'Node.js SHA-256 verification failed.'
+        tar -xJf "$NODE_STAGE_DIR/$package" --no-same-owner -C "$NODE_STAGE_DIR"
+        staged_node="$NODE_STAGE_DIR/node-${NODE_VERSION}-linux-x64"
+        [[ -x $staged_node/bin/node &&
+           $("$staged_node/bin/node" --version) == "$NODE_VERSION" ]] || die 'Unexpected Node.js archive contents.'
+        "$staged_node/bin/node" "$staged_node/lib/node_modules/npm/bin/npm-cli.js" --version
+
+        if [[ -e $NODE_INSTALL_DIR || -L $NODE_INSTALL_DIR ]]; then
+            backup_dir="$NODE_INSTALL_DIR.backup-$(date +%Y%m%d-%H%M%S)-$$"
+            [[ ! -e $backup_dir && ! -L $backup_dir ]] || die "Backup path already exists: $backup_dir"
+            mv -T -- "$NODE_INSTALL_DIR" "$backup_dir"
+        fi
+        if ! mv -T -- "$staged_node" "$NODE_INSTALL_DIR"; then
+            if [[ -n $backup_dir && ! -e $NODE_INSTALL_DIR && ! -L $NODE_INSTALL_DIR ]]; then
+                mv -T -- "$backup_dir" "$NODE_INSTALL_DIR"
+            fi
+            die "Could not install Node.js at $NODE_INSTALL_DIR."
+        fi
+        [[ -z $backup_dir ]] || log "Previous Node.js installation preserved at $backup_dir"
+        rm -rf -- "$NODE_STAGE_DIR"
+        NODE_STAGE_DIR=
+    fi
+
+    path_line="export PATH=\"$NODE_INSTALL_DIR/bin:\$PATH\""
+    if ! grep -Fqx "$path_line" "$NODE_BASHRC_FILE"; then
+        printf '\n# debian12-init Node.js\n%s\n' "$path_line" >> "$NODE_BASHRC_FILE"
+    fi
+    export PATH="$NODE_INSTALL_DIR/bin:$PATH"
+    hash -r
+    [[ $(node --version) == "$NODE_VERSION" ]] || die 'Node.js is not available through PATH.'
+    npm --version
 }
 
 [[ $EUID -eq 0 ]] || die 'Run this script as root.'
@@ -60,7 +113,7 @@ if [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
 fi
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography xz-utils
 
 log 'Disabling Alibaba Cloud agents when installed'
 CLOUD_AGENT_WARNINGS=()
@@ -92,6 +145,8 @@ if ! grep -Fqx 'set mouse=' /etc/vim/vimrc.local 2>/dev/null; then
     printf '\n" debian12-init: disable mouse mode by default\nset mouse=\n' >> /etc/vim/vimrc.local
 fi
 chmod 644 /etc/vim/vimrc.local
+
+install_node
 
 # Use the server's public IPv4 address, not its private interface address.
 PUBLIC_IP=$(curl -4fsSL --max-time 8 https://api.ipify.org 2>/dev/null || true)
@@ -718,6 +773,7 @@ SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT##* }
 printf '\n===== Setup complete =====\n'
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
 printf 'Date locale: %s\n' "$SELECTED_DATE_LOCALE"
+printf 'Node.js: %s (%s)\n' "$(node --version)" "$NODE_INSTALL_DIR"
 printf '1Panel directory: %s\n' "$PANEL_DATA_DIR"
 printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_ENTRANCE"
 printf '1Panel tunnel: ssh -p %s -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$SSH_TUNNEL_PORT" "$PANEL_PORT" "$PANEL_PORT"

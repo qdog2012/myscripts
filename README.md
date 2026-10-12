@@ -2,7 +2,7 @@
 
 `debian12-init.sh` installs 1Panel, Docker with Compose, OpenResty through the
 1Panel app store, a small XFCE desktop, Google Chrome, and TigerVNC on a fresh
-Debian 12 amd64 server. It also installs `tmux`, `htop`,
+Debian 12 amd64 server. It also installs Node.js `v24.21.0`, `tmux`, `htop`,
 and `vim`, disables Vim mouse mode by default, and adds interactive Bash aliases
 for `ll`, `cp -i`, and `mv -i`. Run it as root:
 
@@ -10,6 +10,14 @@ for `ll`, `cp -i`, and `mv -i`. Run it as root:
 curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-init.sh
 bash debian12-init.sh
 ```
+
+Node.js is downloaded from the official `node-v24.21.0-linux-x64.tar.xz`
+release, verified against its SHA-256 checksum, and installed at
+`/serverdata/node`. The script adds `export PATH="/serverdata/node/bin:$PATH"`
+to `/etc/bash.bashrc` for new interactive Bash terminals and sets PATH for its
+own process. An existing installation of the same version is reused, preserving
+global npm packages. A different installation is backed up before replacement;
+its global packages remain in that backup and are not migrated automatically.
 
 If present, the script stops and disables the Alibaba Cloud `cloudmonitor` and
 `aliyun` services. This also disables their cloud monitoring and remote-assistance
