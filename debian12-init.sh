@@ -317,6 +317,7 @@ if [[ $INSTALL_OPENRESTY == 1 ]]; then
     cat > "$WORK_DIR/install-openresty.py" <<'PYTHON'
 import base64
 import http.cookiejar
+import http.client
 import json
 import os
 from pathlib import Path
@@ -324,6 +325,7 @@ import re
 import secrets
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -339,7 +341,9 @@ https_port = int(os.environ['OPENRESTY_HTTPS_PORT'])
 panel_data_dir = Path(os.environ['PANEL_DATA_DIR'])
 stream_dir = Path(os.environ['STREAM_CONFIG_DIR'])
 jar = http.cookiejar.CookieJar()
-opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+# This is a local management connection even when the shell has proxy variables.
+opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(jar))
 
 
 def request(method, path, data=None, extra_headers=None):
@@ -354,8 +358,38 @@ def request(method, path, data=None, extra_headers=None):
     return result.get('data')
 
 
-with opener.open(base + '/admin', timeout=30):
-    pass
+def wait_for_panel():
+    # systemd Type=simple becomes active before 1Panel opens its HTTP socket.
+    deadline = time.monotonic() + 120
+    last_error = 'not ready'
+    announced = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(
+                f'1Panel did not become ready at {base}/admin within 120 seconds '
+                f'({last_error}).\nCheck: systemctl status 1panel --no-pager -l\n'
+                'Check: journalctl -u 1panel -n 80 --no-pager\n'
+                f'Check: ss -lntp (expected panel port {port})')
+        try:
+            with opener.open(base + '/admin', timeout=min(5, remaining)):
+                return
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code not in {502, 503, 504}:
+                raise SystemExit(
+                    f'1Panel returned HTTP {error.code} at {base}/admin; '
+                    'check the panel protocol, port and secure entrance.') from None
+            last_error = f'HTTP {error.code}'
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+            last_error = str(getattr(error, 'reason', error))
+        if not announced:
+            print(f'Waiting up to 120 seconds for 1Panel at {base}/admin', flush=True)
+            announced = True
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
+
+
+wait_for_panel()
 key_cookie = next((c.value for c in jar if c.name == 'panel_public_key'), None)
 if not key_cookie:
     raise RuntimeError('1Panel public key cookie is unavailable')
