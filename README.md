@@ -11,6 +11,12 @@ curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-i
 bash debian12-init.sh
 ```
 
+The script completes base utilities, Node.js, time zone/date settings, XFCE,
+TigerVNC, and Chrome first. After verifying VNC is listening on
+`127.0.0.1:5901`, it installs 1Panel, Docker, and OpenResty as the final stage.
+If that final stage fails, the configured desktop and VNC service remain
+available.
+
 Node.js is downloaded from the official `node-v24.21.0-linux-x64.tar.xz`
 release, verified against its SHA-256 checksum, and installed at
 `/serverdata/node`. The script adds `export PATH="/serverdata/node/bin:$PATH"`

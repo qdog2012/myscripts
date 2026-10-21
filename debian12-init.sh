@@ -203,12 +203,233 @@ else
     PANEL_PASSWORD=$(openssl rand -hex 12)
 fi
 
+log 'Installing the minimal XFCE session and TigerVNC'
+apt-get install -y --no-install-recommends \
+    xfce4-session xfce4-panel xfdesktop4 xfwm4 xfce4-terminal thunar \
+    dbus-x11 tigervnc-standalone-server fonts-dejavu-core fonts-wqy-microhei locales
+
+if ! locale -a | grep -qi '^zh_CN\.utf8$'; then
+    sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
+    grep -q '^zh_CN.UTF-8 UTF-8$' /etc/locale.gen || printf 'zh_CN.UTF-8 UTF-8\n' >> /etc/locale.gen
+    locale-gen zh_CN.UTF-8
+fi
+
+# LC_TIME controls date formatting separately from the Chinese desktop UI.
+date_locale_for_country() {
+    local country=$1 language=en base
+    [[ $country =~ ^[A-Z]{2}$ ]] || return 1
+    case $country in
+        CN|TW|HK|MO) language=zh ;;
+        JP) language=ja ;;
+        KR) language=ko ;;
+        DE|AT|CH) language=de ;;
+        FR) language=fr ;;
+        ES|MX|AR|CL|CO|PE) language=es ;;
+        BR|PT) language=pt ;;
+        RU) language=ru ;;
+        IT) language=it ;;
+        NL|BE) language=nl ;;
+        PL) language=pl ;;
+        TR) language=tr ;;
+        TH) language=th ;;
+        VN) language=vi ;;
+        ID) language=id ;;
+    esac
+    for base in "${language}_${country}" "en_${country}"; do
+        if [[ -f /usr/share/i18n/locales/$base ]]; then
+            printf '%s.UTF-8\n' "$base"
+            return 0
+        fi
+    done
+    base=$(find /usr/share/i18n/locales -maxdepth 1 -type f -name "*_${country}" -printf '%f\n' | sort | head -n 1)
+    [[ -n $base ]] || return 1
+    printf '%s.UTF-8\n' "$base"
+}
+
+SELECTED_DATE_LOCALE=$(sed -nE 's/^LC_TIME="?([^"[:space:]]+)"?$/\1/p' /etc/default/locale | tail -n 1)
+SELECTED_DATE_LOCALE=${SELECTED_DATE_LOCALE:-zh_CN.UTF-8}
+APPLY_DATE_LOCALE=0
+if [[ $DATE_LOCALE == auto ]]; then
+    COUNTRY_CODE=
+    if [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        for provider_url in "https://ipinfo.io/$PUBLIC_IP/country" "https://ipapi.co/$PUBLIC_IP/country_code/"; do
+            candidate=$(curl -4fsSL --max-time 8 "$provider_url" 2>/dev/null || true)
+            candidate=${candidate//$'\r'/}
+            candidate=${candidate//$'\n'/}
+            if [[ $candidate =~ ^[A-Z]{2}$ ]]; then
+                COUNTRY_CODE=$candidate
+                break
+            fi
+        done
+    fi
+    if [[ -n $COUNTRY_CODE ]] && candidate=$(date_locale_for_country "$COUNTRY_CODE"); then
+        SELECTED_DATE_LOCALE=$candidate
+        APPLY_DATE_LOCALE=1
+        log "Date locale selected from public IP $PUBLIC_IP ($COUNTRY_CODE): $SELECTED_DATE_LOCALE"
+    else
+        log "IP date locale lookup failed; keeping $SELECTED_DATE_LOCALE"
+    fi
+elif [[ $DATE_LOCALE != keep ]]; then
+    SELECTED_DATE_LOCALE=$DATE_LOCALE
+    APPLY_DATE_LOCALE=1
+fi
+
+locale_base=${SELECTED_DATE_LOCALE%.UTF-8}
+[[ $SELECTED_DATE_LOCALE == "$locale_base.UTF-8" && $locale_base =~ ^[a-z]{2,3}_[A-Z]{2}$ && -f /usr/share/i18n/locales/$locale_base ]] || die "Invalid DATE_LOCALE: $SELECTED_DATE_LOCALE"
+if ! locale -a | grep -qi "^${locale_base}\.utf8$"; then
+    grep -Eq "^${locale_base}(\.UTF-8)? UTF-8$" /etc/locale.gen || printf '%s UTF-8\n' "$locale_base" >> /etc/locale.gen
+    locale-gen
+fi
+if [[ $APPLY_DATE_LOCALE == 1 ]]; then
+    update-locale "LC_TIME=$SELECTED_DATE_LOCALE"
+fi
+
+if ! id "$DESKTOP_USER" >/dev/null 2>&1; then
+    useradd --create-home --shell /bin/bash "$DESKTOP_USER"
+fi
+DESKTOP_HOME=$(getent passwd "$DESKTOP_USER" | cut -d: -f6)
+[[ -d $DESKTOP_HOME ]] || die "Home directory missing for $DESKTOP_USER."
+install -d -m 700 -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DESKTOP_HOME/.vnc"
+install -d -m 755 -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DESKTOP_HOME/Desktop"
+
+cat > "$DESKTOP_HOME/.vnc/xstartup" <<'XSTARTUP'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+exec dbus-launch --exit-with-session startxfce4
+XSTARTUP
+chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/.vnc/xstartup"
+chmod 700 "$DESKTOP_HOME/.vnc/xstartup"
+
+rm -f -- "$DESKTOP_HOME/.vnc/passwd"
+
+cat > /etc/systemd/system/tigervnc-desktop.service <<EOF
+[Unit]
+Description=TigerVNC XFCE desktop for $DESKTOP_USER
+After=network.target
+
+[Service]
+Type=simple
+User=$DESKTOP_USER
+Group=$DESKTOP_USER
+WorkingDirectory=$DESKTOP_HOME
+Environment=HOME=$DESKTOP_HOME
+Environment=LANG=zh_CN.UTF-8
+Environment=LANGUAGE=zh_CN:zh
+Environment=LC_TIME=$SELECTED_DATE_LOCALE
+ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry $VNC_GEOMETRY -depth 24 -SecurityTypes None
+ExecStop=-/usr/bin/tigervncserver -kill $VNC_DISPLAY
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable tigervnc-desktop.service
+systemctl restart tigervnc-desktop.service
+systemctl is-active --quiet tigervnc-desktop.service || die 'TigerVNC service is not active.'
+systemctl is-enabled --quiet tigervnc-desktop.service || die 'TigerVNC service is not enabled at boot.'
+
+log 'Installing Google Chrome from the official apt repository'
+ensure_chrome_key
+printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' > /etc/apt/sources.list.d/google-chrome.list
+chmod 644 /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/google-chrome.list
+apt-get update
+apt-get install -y --no-install-recommends google-chrome-stable
+
+# Chrome's supported enterprise policy disables the local GenAI model and
+# removes an already downloaded model. Keep this policy readable by all users.
+install -d -m 755 /etc/opt/chrome/policies/managed
+printf '{"GenAILocalFoundationalModelSettings":1}\n' > /etc/opt/chrome/policies/managed/10-on-device-ai.json
+chmod 644 /etc/opt/chrome/policies/managed/10-on-device-ai.json
+
+cat > /usr/local/bin/chrome-low-resource <<'CHROME'
+#!/bin/sh
+# Keep background work and renderer fan-out small; preserve Chrome's sandbox.
+# Chrome treats a lock from an old host name as another machine using the
+# profile. Clear stale symlinks only when this user has no Chrome process.
+profile_dir=${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome
+lock_file=$profile_dir/SingletonLock
+if [ -L "$lock_file" ]; then
+    lock_owner=$(readlink -- "$lock_file")
+    lock_pid=${lock_owner##*-}
+    case "$lock_pid" in
+        ''|*[!0-9]*) ;;
+        *)
+            lock_host=${lock_owner%-$lock_pid}
+            if [ "$lock_host" != "$(hostname)" ] &&
+               ! pgrep -u "$(id -u)" -x chrome >/dev/null 2>&1; then
+                for name in SingletonLock SingletonCookie SingletonSocket; do
+                    [ ! -L "$profile_dir/$name" ] || rm -f -- "$profile_dir/$name"
+                done
+            fi
+            ;;
+    esac
+fi
+exec /usr/bin/google-chrome-stable \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-background-mode \
+    --disable-background-networking \
+    --disable-component-update \
+    --disable-default-apps \
+    --disable-extensions \
+    --disable-sync \
+    --process-per-site \
+    --renderer-process-limit=2 \
+    --disk-cache-size=52428800 \
+    "$@"
+CHROME
+chmod 755 /usr/local/bin/chrome-low-resource
+cat > "$DESKTOP_HOME/Desktop/Google Chrome.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Google Chrome (low resource)
+Comment=Start Chrome with reduced background work
+Exec=/usr/local/bin/chrome-low-resource %U
+Icon=google-chrome
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+DESKTOP
+chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
+chmod 755 "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
+
+# XFCE's clock has its own fixed date format by default. %x delegates to the
+# session's LC_TIME so the panel follows the detected regional date format.
+PANEL_BUS=
+for attempt in {1..15}; do
+    PANEL_PID=$(pgrep -u "$DESKTOP_USER" -x xfce4-panel | head -n 1 || true)
+    if [[ -n $PANEL_PID ]]; then
+        PANEL_BUS=$(tr '\0' '\n' < "/proc/$PANEL_PID/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+        [[ -z $PANEL_BUS ]] || break
+    fi
+    sleep 1
+done
+[[ -n $PANEL_BUS ]] || die 'XFCE panel session bus is unavailable.'
+XFCONF=(runuser -u "$DESKTOP_USER" -- env DISPLAY="$VNC_DISPLAY" DBUS_SESSION_BUS_ADDRESS="$PANEL_BUS" xfconf-query -c xfce4-panel)
+CLOCK_PLUGINS=$("${XFCONF[@]}" -lv | awk '$2 == "clock" && $1 ~ /^\/plugins\/plugin-[0-9]+$/ {print $1}')
+if [[ -n $CLOCK_PLUGINS ]]; then
+    while IFS= read -r clock_plugin; do
+        "${XFCONF[@]}" -p "$clock_plugin/digital-date-format" -n -t string -s '%x'
+    done <<< "$CLOCK_PLUGINS"
+    log "XFCE clock date format follows $SELECTED_DATE_LOCALE"
+fi
+
+for attempt in {1..15}; do
+    ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' && break
+    sleep 1
+done
+ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
+
+# Install the panel stack last so desktop access is ready before this stage.
 if ! command -v 1pctl >/dev/null 2>&1; then
     if [[ -d $PANEL_DATA_DIR ]] && [[ -n $(find "$PANEL_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
         die "$PANEL_DATA_DIR is not empty; the upstream installer would erase its contents."
     fi
     log "Installing 1Panel $PANEL_VERSION"
-    WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
     PACKAGE="1panel-${PANEL_VERSION}-linux-amd64.tar.gz"
     BASE_URL="https://resource.fit2cloud.com/1panel/package/stable/${PANEL_VERSION}/release"
     curl -fsSL --retry 3 -o "$WORK_DIR/checksums.txt" "$BASE_URL/checksums.txt"
@@ -579,225 +800,6 @@ PYTHON
     ss -ltn | grep -qE '0\.0\.0\.0:443[[:space:]]' || die 'OpenResty TLS stream is not listening on public IPv4 port 443.'
 fi
 
-log 'Installing the minimal XFCE session and TigerVNC'
-apt-get install -y --no-install-recommends \
-    xfce4-session xfce4-panel xfdesktop4 xfwm4 xfce4-terminal thunar \
-    dbus-x11 tigervnc-standalone-server fonts-dejavu-core fonts-wqy-microhei locales
-
-if ! locale -a | grep -qi '^zh_CN\.utf8$'; then
-    sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
-    grep -q '^zh_CN.UTF-8 UTF-8$' /etc/locale.gen || printf 'zh_CN.UTF-8 UTF-8\n' >> /etc/locale.gen
-    locale-gen zh_CN.UTF-8
-fi
-
-# LC_TIME controls date formatting separately from the Chinese desktop UI.
-date_locale_for_country() {
-    local country=$1 language=en base
-    [[ $country =~ ^[A-Z]{2}$ ]] || return 1
-    case $country in
-        CN|TW|HK|MO) language=zh ;;
-        JP) language=ja ;;
-        KR) language=ko ;;
-        DE|AT|CH) language=de ;;
-        FR) language=fr ;;
-        ES|MX|AR|CL|CO|PE) language=es ;;
-        BR|PT) language=pt ;;
-        RU) language=ru ;;
-        IT) language=it ;;
-        NL|BE) language=nl ;;
-        PL) language=pl ;;
-        TR) language=tr ;;
-        TH) language=th ;;
-        VN) language=vi ;;
-        ID) language=id ;;
-    esac
-    for base in "${language}_${country}" "en_${country}"; do
-        if [[ -f /usr/share/i18n/locales/$base ]]; then
-            printf '%s.UTF-8\n' "$base"
-            return 0
-        fi
-    done
-    base=$(find /usr/share/i18n/locales -maxdepth 1 -type f -name "*_${country}" -printf '%f\n' | sort | head -n 1)
-    [[ -n $base ]] || return 1
-    printf '%s.UTF-8\n' "$base"
-}
-
-SELECTED_DATE_LOCALE=$(sed -nE 's/^LC_TIME="?([^"[:space:]]+)"?$/\1/p' /etc/default/locale | tail -n 1)
-SELECTED_DATE_LOCALE=${SELECTED_DATE_LOCALE:-zh_CN.UTF-8}
-APPLY_DATE_LOCALE=0
-if [[ $DATE_LOCALE == auto ]]; then
-    COUNTRY_CODE=
-    if [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        for provider_url in "https://ipinfo.io/$PUBLIC_IP/country" "https://ipapi.co/$PUBLIC_IP/country_code/"; do
-            candidate=$(curl -4fsSL --max-time 8 "$provider_url" 2>/dev/null || true)
-            candidate=${candidate//$'\r'/}
-            candidate=${candidate//$'\n'/}
-            if [[ $candidate =~ ^[A-Z]{2}$ ]]; then
-                COUNTRY_CODE=$candidate
-                break
-            fi
-        done
-    fi
-    if [[ -n $COUNTRY_CODE ]] && candidate=$(date_locale_for_country "$COUNTRY_CODE"); then
-        SELECTED_DATE_LOCALE=$candidate
-        APPLY_DATE_LOCALE=1
-        log "Date locale selected from public IP $PUBLIC_IP ($COUNTRY_CODE): $SELECTED_DATE_LOCALE"
-    else
-        log "IP date locale lookup failed; keeping $SELECTED_DATE_LOCALE"
-    fi
-elif [[ $DATE_LOCALE != keep ]]; then
-    SELECTED_DATE_LOCALE=$DATE_LOCALE
-    APPLY_DATE_LOCALE=1
-fi
-
-locale_base=${SELECTED_DATE_LOCALE%.UTF-8}
-[[ $SELECTED_DATE_LOCALE == "$locale_base.UTF-8" && $locale_base =~ ^[a-z]{2,3}_[A-Z]{2}$ && -f /usr/share/i18n/locales/$locale_base ]] || die "Invalid DATE_LOCALE: $SELECTED_DATE_LOCALE"
-if ! locale -a | grep -qi "^${locale_base}\.utf8$"; then
-    grep -Eq "^${locale_base}(\.UTF-8)? UTF-8$" /etc/locale.gen || printf '%s UTF-8\n' "$locale_base" >> /etc/locale.gen
-    locale-gen
-fi
-if [[ $APPLY_DATE_LOCALE == 1 ]]; then
-    update-locale "LC_TIME=$SELECTED_DATE_LOCALE"
-fi
-
-if ! id "$DESKTOP_USER" >/dev/null 2>&1; then
-    useradd --create-home --shell /bin/bash "$DESKTOP_USER"
-fi
-DESKTOP_HOME=$(getent passwd "$DESKTOP_USER" | cut -d: -f6)
-[[ -d $DESKTOP_HOME ]] || die "Home directory missing for $DESKTOP_USER."
-install -d -m 700 -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DESKTOP_HOME/.vnc"
-install -d -m 755 -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DESKTOP_HOME/Desktop"
-
-cat > "$DESKTOP_HOME/.vnc/xstartup" <<'XSTARTUP'
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-exec dbus-launch --exit-with-session startxfce4
-XSTARTUP
-chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/.vnc/xstartup"
-chmod 700 "$DESKTOP_HOME/.vnc/xstartup"
-
-rm -f -- "$DESKTOP_HOME/.vnc/passwd"
-
-cat > /etc/systemd/system/tigervnc-desktop.service <<EOF
-[Unit]
-Description=TigerVNC XFCE desktop for $DESKTOP_USER
-After=network.target
-
-[Service]
-Type=simple
-User=$DESKTOP_USER
-Group=$DESKTOP_USER
-WorkingDirectory=$DESKTOP_HOME
-Environment=HOME=$DESKTOP_HOME
-Environment=LANG=zh_CN.UTF-8
-Environment=LANGUAGE=zh_CN:zh
-Environment=LC_TIME=$SELECTED_DATE_LOCALE
-ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry $VNC_GEOMETRY -depth 24 -SecurityTypes None
-ExecStop=-/usr/bin/tigervncserver -kill $VNC_DISPLAY
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable tigervnc-desktop.service
-systemctl restart tigervnc-desktop.service
-systemctl is-active --quiet tigervnc-desktop.service || die 'TigerVNC service is not active.'
-systemctl is-enabled --quiet tigervnc-desktop.service || die 'TigerVNC service is not enabled at boot.'
-
-log 'Installing Google Chrome from the official apt repository'
-ensure_chrome_key
-printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' > /etc/apt/sources.list.d/google-chrome.list
-chmod 644 /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/google-chrome.list
-apt-get update
-apt-get install -y --no-install-recommends google-chrome-stable
-
-# Chrome's supported enterprise policy disables the local GenAI model and
-# removes an already downloaded model. Keep this policy readable by all users.
-install -d -m 755 /etc/opt/chrome/policies/managed
-printf '{"GenAILocalFoundationalModelSettings":1}\n' > /etc/opt/chrome/policies/managed/10-on-device-ai.json
-chmod 644 /etc/opt/chrome/policies/managed/10-on-device-ai.json
-
-cat > /usr/local/bin/chrome-low-resource <<'CHROME'
-#!/bin/sh
-# Keep background work and renderer fan-out small; preserve Chrome's sandbox.
-# Chrome treats a lock from an old host name as another machine using the
-# profile. Clear stale symlinks only when this user has no Chrome process.
-profile_dir=${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome
-lock_file=$profile_dir/SingletonLock
-if [ -L "$lock_file" ]; then
-    lock_owner=$(readlink -- "$lock_file")
-    lock_pid=${lock_owner##*-}
-    case "$lock_pid" in
-        ''|*[!0-9]*) ;;
-        *)
-            lock_host=${lock_owner%-$lock_pid}
-            if [ "$lock_host" != "$(hostname)" ] &&
-               ! pgrep -u "$(id -u)" -x chrome >/dev/null 2>&1; then
-                for name in SingletonLock SingletonCookie SingletonSocket; do
-                    [ ! -L "$profile_dir/$name" ] || rm -f -- "$profile_dir/$name"
-                done
-            fi
-            ;;
-    esac
-fi
-exec /usr/bin/google-chrome-stable \
-    --no-first-run \
-    --no-default-browser-check \
-    --disable-background-mode \
-    --disable-background-networking \
-    --disable-component-update \
-    --disable-default-apps \
-    --disable-extensions \
-    --disable-sync \
-    --process-per-site \
-    --renderer-process-limit=2 \
-    --disk-cache-size=52428800 \
-    "$@"
-CHROME
-chmod 755 /usr/local/bin/chrome-low-resource
-cat > "$DESKTOP_HOME/Desktop/Google Chrome.desktop" <<'DESKTOP'
-[Desktop Entry]
-Type=Application
-Name=Google Chrome (low resource)
-Comment=Start Chrome with reduced background work
-Exec=/usr/local/bin/chrome-low-resource %U
-Icon=google-chrome
-Terminal=false
-Categories=Network;WebBrowser;
-StartupNotify=true
-DESKTOP
-chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
-chmod 755 "$DESKTOP_HOME/Desktop/Google Chrome.desktop"
-
-# XFCE's clock has its own fixed date format by default. %x delegates to the
-# session's LC_TIME so the panel follows the detected regional date format.
-PANEL_BUS=
-for attempt in {1..15}; do
-    PANEL_PID=$(pgrep -u "$DESKTOP_USER" -x xfce4-panel | head -n 1 || true)
-    if [[ -n $PANEL_PID ]]; then
-        PANEL_BUS=$(tr '\0' '\n' < "/proc/$PANEL_PID/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
-        [[ -z $PANEL_BUS ]] || break
-    fi
-    sleep 1
-done
-[[ -n $PANEL_BUS ]] || die 'XFCE panel session bus is unavailable.'
-XFCONF=(runuser -u "$DESKTOP_USER" -- env DISPLAY="$VNC_DISPLAY" DBUS_SESSION_BUS_ADDRESS="$PANEL_BUS" xfconf-query -c xfce4-panel)
-CLOCK_PLUGINS=$("${XFCONF[@]}" -lv | awk '$2 == "clock" && $1 ~ /^\/plugins\/plugin-[0-9]+$/ {print $1}')
-if [[ -n $CLOCK_PLUGINS ]]; then
-    while IFS= read -r clock_plugin; do
-        "${XFCONF[@]}" -p "$clock_plugin/digital-date-format" -n -t string -s '%x'
-    done <<< "$CLOCK_PLUGINS"
-    log "XFCE clock date format follows $SELECTED_DATE_LOCALE"
-fi
-
-for attempt in {1..15}; do
-    ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' && break
-    sleep 1
-done
-ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
 PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')}
 # An SSH session exposes the server port as the last SSH_CONNECTION field.
 # SSH_TUNNEL_PORT can override it when the script runs from a local console.
