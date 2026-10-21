@@ -47,6 +47,13 @@ configuration while upgrading an old loopback-only 443 listener to public IPv4.
 The default OpenResty HTTPS site has no certificate; configure a site and
 certificate in 1Panel before expecting direct HTTPS requests to succeed.
 
+Before installing OpenResty, the script waits up to 120 seconds for 1Panel's
+local HTTP entrance to respond. A running systemd process can still be starting
+its HTTP listener. Local API requests bypass HTTP proxy environment variables.
+If startup times out, the script reports the endpoint and service/log commands
+to check. After resolving the panel issue, download the script again and rerun
+it; saved panel credentials and existing OpenResty installations are reused.
+
 An existing 1Panel installation at another base directory must be migrated
 before rerunning this script; the script does not move its application data.
 
