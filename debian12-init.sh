@@ -34,6 +34,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+activate_public_dns() {
+    systemctl enable --now systemd-resolved.service
+    systemctl restart systemd-resolved.service
+    [[ -f /run/systemd/resolve/stub-resolv.conf ]] || die 'systemd-resolved did not create its DNS stub configuration.'
+    ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    systemctl is-active --quiet systemd-resolved.service || die 'systemd-resolved is not active.'
+    systemctl is-enabled --quiet systemd-resolved.service || die 'systemd-resolved is not enabled at boot.'
+}
+
 ensure_chrome_key() {
     if [[ -s /usr/share/keyrings/google-chrome.gpg ]] &&
        gpg --batch --quiet --show-keys /usr/share/keyrings/google-chrome.gpg >/dev/null 2>&1; then
@@ -104,6 +113,34 @@ install_node() {
 [[ $VNC_GEOMETRY =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die 'Invalid VNC_GEOMETRY (expected WIDTHxHEIGHT).'
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Repair DNS before the first apt/curl request, including on minimal images
+# where systemd-resolved has not been installed yet.
+log 'Configuring public DNS (1.1.1.1 and 8.8.8.8)'
+if [[ ( -e /etc/resolv.conf || -L /etc/resolv.conf ) &&
+      ! -e /etc/resolv.conf.debian12-init.bak && ! -L /etc/resolv.conf.debian12-init.bak ]]; then
+    cp -a /etc/resolv.conf /etc/resolv.conf.debian12-init.bak
+fi
+install -d -m 755 /etc/systemd/resolved.conf.d
+cat > /etc/systemd/resolved.conf.d/60-public-dns.conf <<'DNS'
+[Resolve]
+DNS=1.1.1.1 8.8.8.8
+Domains=~.
+DNS
+chmod 644 /etc/systemd/resolved.conf.d/60-public-dns.conf
+# More specific per-link domains, such as Tailscale's, retain their DNS route.
+DNS_BOOTSTRAPPED=0
+if command -v resolvectl >/dev/null 2>&1; then
+    activate_public_dns
+else
+    log 'Using bootstrap DNS until systemd-resolved is installed'
+    rm -f -- /etc/resolv.conf
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+    chmod 644 /etc/resolv.conf
+    DNS_BOOTSTRAPPED=1
+fi
+timeout 15 getent ahostsv4 deb.debian.org >/dev/null || die 'Public DNS cannot resolve deb.debian.org; check outbound DNS connectivity.'
+
 # Repair permissions from an interrupted earlier run before apt reads the repo.
 for apt_file in /usr/share/keyrings/google-chrome.gpg /etc/apt/sources.list.d/google-chrome.list; do
     [[ ! -e $apt_file ]] || chmod 644 "$apt_file"
@@ -113,7 +150,22 @@ if [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
 fi
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography xz-utils
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography xz-utils systemd-resolved
+if [[ $DNS_BOOTSTRAPPED == 1 ]]; then
+    activate_public_dns
+    timeout 15 getent ahostsv4 deb.debian.org >/dev/null || die 'systemd-resolved cannot resolve deb.debian.org after installation.'
+fi
+
+log 'Setting vm.swappiness=60'
+[[ -e /etc/sysctl.conf ]] || install -m 644 /dev/null /etc/sysctl.conf
+[[ -e /etc/sysctl.conf.debian12-init.bak ]] || cp -a /etc/sysctl.conf /etc/sysctl.conf.debian12-init.bak
+if grep -qE '^[[:space:]]*vm\.swappiness[[:space:]]*=' /etc/sysctl.conf; then
+    sed -i -E 's/^[[:space:]]*vm\.swappiness[[:space:]]*=.*/vm.swappiness = 60/' /etc/sysctl.conf
+else
+    printf '\n# debian12-init: allow swapping under memory pressure\nvm.swappiness = 60\n' >> /etc/sysctl.conf
+fi
+sysctl -w vm.swappiness=60
+[[ $(sysctl -n vm.swappiness) == 60 ]] || die 'vm.swappiness did not become 60.'
 
 log 'Disabling Alibaba Cloud agents when installed'
 CLOUD_AGENT_WARNINGS=()
@@ -807,6 +859,8 @@ SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT:-${SSH_CONNECTION:-}}
 SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT##* }
 [[ $SSH_TUNNEL_PORT =~ ^[0-9]{1,5}$ ]] || SSH_TUNNEL_PORT=22
 printf '\n===== Setup complete =====\n'
+printf 'Public DNS: 1.1.1.1, 8.8.8.8 (systemd-resolved; more specific per-link DNS routes preserved)\n'
+printf 'Swap tendency: vm.swappiness=%s\n' "$(sysctl -n vm.swappiness)"
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
 printf 'Date locale: %s\n' "$SELECTED_DATE_LOCALE"
 printf 'Node.js: %s (%s)\n' "$(node --version)" "$NODE_INSTALL_DIR"

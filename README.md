@@ -11,11 +11,21 @@ curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-i
 bash debian12-init.sh
 ```
 
-The script completes base utilities, Node.js, time zone/date settings, XFCE,
-TigerVNC, and Chrome first. After verifying VNC is listening on
+The script configures public DNS first, then completes base utilities, Node.js,
+time zone/date settings, XFCE, TigerVNC, and Chrome. After verifying VNC is listening on
 `127.0.0.1:5901`, it installs 1Panel, Docker, and OpenResty as the final stage.
 If that final stage fails, the configured desktop and VNC service remain
 available.
+
+Before the first network installation, the script configures public DNS as
+`1.1.1.1` and `8.8.8.8`. It uses systemd-resolved with the global `~.` route
+and links `/etc/resolv.conf` to its local stub. More specific per-link routes,
+including Tailscale's private domains, keep their own DNS servers. On minimal
+images without systemd-resolved, a temporary public resolver configuration
+allows apt to install it before switching to the stub. The original
+`/etc/resolv.conf` is backed up once at `/etc/resolv.conf.debian12-init.bak`.
+DNS resolution is checked before installation continues; the resolver is
+enabled at boot.
 
 Node.js is downloaded from the official `node-v24.21.0-linux-x64.tar.xz`
 release, verified against its SHA-256 checksum, and installed at
@@ -95,6 +105,10 @@ disables Chrome's on-device AI model through the managed
 `GenAILocalFoundationalModelSettings` policy. This keeps the setting off for all
 Chrome profiles and shows it as managed in Chrome settings. For
 machines with less than 2 GiB RAM and no active swap, it adds a 4 GiB swap file.
+It also sets `vm.swappiness=60` immediately and persistently in `/etc/sysctl.conf`,
+replacing an existing value such as `0`. The original sysctl file is backed up
+once at `/etc/sysctl.conf.debian12-init.bak`. Existing swap files are retained
+without resizing.
 The desktop Chrome launcher clears stale profile locks left by a server host-name
 change when no Chrome process is running.
 
