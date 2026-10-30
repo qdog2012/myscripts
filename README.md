@@ -103,8 +103,27 @@ The script uses the official 1Panel `v1.10.34-lts` package and verifies its
 SHA-256 checksum. It installs Chrome from Google's signed apt repository and
 disables Chrome's on-device AI model through the managed
 `GenAILocalFoundationalModelSettings` policy. This keeps the setting off for all
-Chrome profiles and shows it as managed in Chrome settings. For
-machines with less than 2 GiB RAM and no active swap, it adds a 4 GiB swap file.
+Chrome profiles and shows it as managed in Chrome settings.
+
+The script also writes `/etc/opt/chrome/policies/managed/20-low-resource.json`
+with these mandatory policies for existing and future Chrome profiles:
+
+| Setting | Policy | Value |
+| --- | --- | --- |
+| Memory Saver enabled | `HighEfficiencyModeEnabled` | `true` |
+| Maximum memory savings | `MemorySaverModeSavings` | `2` |
+| Webpage preloading disabled | `NetworkPredictionOptions` | `2` |
+| Graphics acceleration disabled | `HardwareAccelerationModeEnabled` | `false` |
+
+Settings appear as managed. Restart Chrome after applying them to an existing
+installation, then open `chrome://policy` to check their status. Maximum Memory
+Saver discards inactive tabs sooner and can cause more frequent reloads; it
+does not cap the active tab's memory. Disabling graphics acceleration suits
+this VNC setup but can increase CPU usage on graphics-heavy pages. Policy
+names, values, and supported versions follow the
+[Chromium policy definitions](https://github.com/chromium/chromium/tree/main/components/policy/resources/templates/policy_definitions/Miscellaneous).
+
+For machines with less than 2 GiB RAM and no active swap, it adds a 4 GiB swap file.
 It also sets `vm.swappiness=60` immediately and persistently in `/etc/sysctl.conf`,
 replacing an existing value such as `0`. The original sysctl file is backed up
 once at `/etc/sysctl.conf.debian12-init.bak`. Existing swap files are retained

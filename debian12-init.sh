@@ -396,6 +396,19 @@ install -d -m 755 /etc/opt/chrome/policies/managed
 printf '{"GenAILocalFoundationalModelSettings":1}\n' > /etc/opt/chrome/policies/managed/10-on-device-ai.json
 chmod 644 /etc/opt/chrome/policies/managed/10-on-device-ai.json
 
+# Apply resource settings to every profile, including profiles created later.
+# Graphics acceleration changes take effect after restarting Chrome.
+log 'Configuring Chrome Memory Saver (maximum), disabling preloading and graphics acceleration'
+cat > /etc/opt/chrome/policies/managed/20-low-resource.json <<'CHROME_POLICY'
+{
+    "HighEfficiencyModeEnabled": true,
+    "MemorySaverModeSavings": 2,
+    "NetworkPredictionOptions": 2,
+    "HardwareAccelerationModeEnabled": false
+}
+CHROME_POLICY
+chmod 644 /etc/opt/chrome/policies/managed/20-low-resource.json
+
 cat > /usr/local/bin/chrome-low-resource <<'CHROME'
 #!/bin/sh
 # Keep background work and renderer fan-out small; preserve Chrome's sandbox.
