@@ -183,9 +183,9 @@ fi
 # A 1.6 GiB machine has little headroom for Docker, XFCE, and Chrome together.
 if (( $(awk '/MemTotal:/ {print $2}' /proc/meminfo) < 2097152 )) &&
    [[ $(swapon --noheadings --show | wc -l) -eq 0 ]]; then
-    log 'Adding 2 GiB swap for this low-memory server'
+    log 'Adding 4 GiB swap for this low-memory server'
     if [[ ! -e /swapfile ]]; then
-        fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+        fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
         chmod 600 /swapfile
         mkswap /swapfile
     fi
