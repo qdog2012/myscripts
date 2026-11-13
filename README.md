@@ -1,8 +1,8 @@
 # Debian 12 server setup
 
 `debian12-init.sh` installs 1Panel, Docker with Compose, OpenResty through the
-1Panel app store, a small XFCE desktop, Google Chrome, and TigerVNC on a fresh
-Debian 12 amd64 server. It also installs Node.js `v24.21.0`, `tmux`, `htop`,
+1Panel app store, Trojan with TLS, a small XFCE desktop, Google Chrome, and
+TigerVNC on a fresh Debian 12 amd64 server. It also installs Node.js `v24.21.0`, `tmux`, `htop`,
 and `vim`, disables Vim mouse mode by default, and adds interactive Bash aliases
 for `ll`, `cp -i`, and `mv -i`. Run it as root:
 
@@ -11,11 +11,13 @@ curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-i
 bash debian12-init.sh
 ```
 
-The script configures public DNS first, then completes base utilities, Node.js,
-time zone/date settings, XFCE, TigerVNC, and Chrome. After verifying VNC is listening on
-`127.0.0.1:5901`, it installs 1Panel, Docker, and OpenResty as the final stage.
-If that final stage fails, the configured desktop and VNC service remain
-available.
+Before changing the system, the script prompts for the Trojan domain in the
+terminal. No domain is hard-coded. It then configures public DNS and completes
+base utilities, Node.js, time zone/date settings, XFCE, TigerVNC, and Chrome.
+After verifying VNC is listening on
+`127.0.0.1:5901`, it configures Trojan, then installs the 1Panel/Docker/OpenResty
+stack as the final stage. If either later stage fails, the configured desktop
+and VNC service remain available.
 
 Before the first network installation, the script configures public DNS as
 `1.1.1.1` and `8.8.8.8`. It uses systemd-resolved with the global `~.` route
@@ -142,6 +144,65 @@ Chinese. It also sets the XFCE panel clock to `%x`, so its visible date follows
 `LC_TIME`. If geolocation fails, it keeps the prior date locale. Set
 `DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
 `DATE_LOCALE=keep` to preserve the current date locale.
+
+## Trojan for Spectre
+
+Trojan is installed by default using Debian's `trojan` package, with a locally
+generated self-signed TLS certificate on TCP `8443`. The existing OpenResty
+`443` stream listener and website HTTPS port `18443` keep their current roles.
+Set `TROJAN_PORT=PORT` to select another
+unoccupied port (1024–65535). Set `INSTALL_TROJAN=0` to skip Trojan and its
+domain prompt.
+
+For client access, create a DNS **A record** for the chosen domain pointing to
+this server's public IPv4 address. Use DNS-only mode rather than a CDN proxy.
+Avoid AAAA records: this setup listens on IPv4. Allow inbound TCP `8443` (or
+your chosen `TROJAN_PORT`) in the cloud security group and any local firewall.
+The installer does not modify firewall rules. Certificates are generated
+locally; Trojan setup does not use ACME, install Certbot, or require port `80`.
+
+At startup, enter the domain alone, without `https://`, a port, or a path.
+Invalid values are rejected before any system changes. Reruns still prompt;
+press Enter to reuse the previous domain or enter a replacement. The random
+48-character password is retained across reruns. The prompt reads from the
+terminal even with `curl | bash`; downloading and then running the script as
+shown above is recommended. Without a terminal it stops before changing the
+system, unless Trojan is disabled.
+
+The certificate includes the entered domain in its Subject Alternative Name
+and is valid for 3650 days. Reruns reuse a matching certificate and key if more
+than 30 days remain. Changing the domain, an invalid/mismatched key, or a
+certificate approaching expiry triggers replacement; the old files are backed
+up under `/etc/trojan/tls/backup-*`. Update any client certificate trust/pin
+after replacing the certificate. There is no certificate renewal service;
+rerun the installer before expiry to generate a replacement.
+
+The installer enables `trojan.service` at boot, checks a local TLS handshake
+against the generated certificate and domain, and prints the server, port,
+password, certificate SHA-256 fingerprint, and a `trojan://` import link for
+Spectre. Keep TLS enabled. If the client supports trusting/pinning this
+certificate, configure that; otherwise enable **skip certificate verification**
+in Spectre. Skipping verification encrypts traffic but does not authenticate
+the server. The import link may not set this option; check it in the client.
+Credentials are also saved in
+`/root/.config/debian12-init/trojan` with mode `0600`. An existing Trojan
+installation not managed by this script must be migrated before running this
+stage; it is not overwritten automatically.
+
+The managed server config is `/etc/trojan/debian12-init.json`. The packaged
+service runs as `nobody`; its `credentials.conf` systemd override supplies
+private copies of the config, certificate, and private key using
+`LoadCredential`. The certificate is `/etc/trojan/tls/server.crt`; the key is
+`/etc/trojan/tls/server.key`, with mode `0600` inside a root-only directory.
+Check the service with:
+
+```bash
+systemctl status trojan --no-pager
+ss -lntp | grep ':8443'
+```
+
+If startup fails, resolve any port conflict and rerun the installer. The
+desktop, VNC, and generated Trojan password remain available.
 
 ## FRP tunnel through an internal server
 
