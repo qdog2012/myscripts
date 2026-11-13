@@ -19,6 +19,30 @@ After verifying VNC is listening on
 stack as the final stage. If either later stage fails, the configured desktop
 and VNC service remain available.
 
+The script installs OpenSSH Server and changes its listening port to **2424**
+after the base packages are ready. Allow inbound TCP `2424` in the cloud
+security group and any local firewall **before running the script**. It does
+not change authentication settings or automatically edit firewall rules.
+After setup, connect with:
+
+```bash
+ssh -p 2424 root@YOUR_SERVER
+```
+
+The SSH step updates global `Port` directives in the main config and its
+included files, as well as explicit ports in `ListenAddress`. Modified files
+are backed up under `/root/.config/debian12-init/ssh-backup-*`, with a manifest
+mapping each backup to its original path. A `Match LocalPort` rule targeting
+other ports stops the change before SSH configs are modified; migrate such
+port-dependent login rules manually first. It checks syntax and effective
+listening addresses before applying the change. It enables `ssh.service` at
+boot and disables `ssh.socket` so the socket unit cannot keep port `22` open.
+Ordinary daemon mode uses a reload; socket-activated mode restarts the listener
+with Debian's `KillMode=process`, preserving established SSH sessions. If the
+service fails to listen on `2424`, it restores the previous configuration and
+service/socket state. The local listener check cannot verify cloud firewall
+access; keep the current session open until a new connection on `2424` works.
+
 Before the first network installation, the script configures public DNS as
 `1.1.1.1` and `8.8.8.8`. It uses systemd-resolved with the global `~.` route
 and links `/etc/resolv.conf` to its local stub. More specific per-link routes,
@@ -80,12 +104,12 @@ computer, create an SSH tunnel and then connect a VNC viewer to
 `127.0.0.1:5901`:
 
 ```bash
-ssh -L 5901:127.0.0.1:5901 root@YOUR_SERVER
+ssh -p 2424 -L 5901:127.0.0.1:5901 root@YOUR_SERVER
 ```
 
-If SSH uses a custom port, add `-p PORT` to the tunnel command. The setup
-script detects the port of its SSH session when printing tunnel examples;
-set `SSH_TUNNEL_PORT` when running from a local console.
+The printed tunnel commands use `2424`, even when the current session was
+opened on the old port. Set `SSH_TUNNEL_PORT` only if an external NAT mapping
+uses a different public port; this affects examples, not the SSH service.
 
 The XFCE session uses `zh_CN.UTF-8` and the lightweight WenQuanYi Micro Hei
 font for Chinese text. Its default resolution is `1680x1050`; set
@@ -95,7 +119,7 @@ systemd services are enabled at boot.
 If the cloud firewall blocks direct access to the 1Panel port, use a tunnel:
 
 ```bash
-ssh -L 8080:127.0.0.1:8080 root@YOUR_SERVER
+ssh -p 2424 -L 8080:127.0.0.1:8080 root@YOUR_SERVER
 ```
 
 Then open `http://127.0.0.1:8080/admin`. To use the public 1Panel URL,
