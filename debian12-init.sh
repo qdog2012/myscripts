@@ -29,6 +29,7 @@ DESKTOP_USER=${DESKTOP_USER:-desktop}
 VNC_DISPLAY=:1
 VNC_PORT=5901
 VNC_GEOMETRY=${VNC_GEOMETRY:-1680x1050}
+SSH_PORT=2424
 CREDENTIALS_FILE=/root/.config/debian12-init/credentials
 WORK_DIR=
 
@@ -47,6 +48,169 @@ activate_public_dns() {
     ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
     systemctl is-active --quiet systemd-resolved.service || die 'systemd-resolved is not active.'
     systemctl is-enabled --quiet systemd-resolved.service || die 'systemd-resolved is not enabled at boot.'
+}
+
+rewrite_ssh_port() {
+    python3 - "$@" <<'SSH_CONFIG_PYTHON'
+import glob
+import json
+from pathlib import Path
+import re
+import shlex
+import shutil
+import sys
+
+mode, main, backup, port = sys.argv[1:]
+include_base = Path(main).absolute().parent
+main, backup = Path(main).resolve(), Path(backup)
+manifest = backup / 'manifest.json'
+if mode == 'restore':
+    if manifest.exists():
+        for item in json.loads(manifest.read_text()):
+            shutil.copyfile(backup / item['backup'], item['path'])
+    raise SystemExit(0)
+
+files = {}
+directive = re.compile(r'^\s*([A-Za-z]+)(?:\s*=\s*|\s+)(.*?)\s*$')
+marker = '# debian12-init SSH port\n'
+
+
+def read_config(path):
+    path = path.resolve()
+    if path in files:
+        return
+    text = path.read_text()
+    files[path] = text
+    for line in text.splitlines():
+        match = directive.match(line)
+        if match and match[1].lower() == 'match':
+            criteria = shlex.split(match[2], comments=True)
+            for index in range(0, len(criteria), 2):
+                if criteria[index].lower() == 'localport' and criteria[index + 1] != port:
+                    raise SystemExit(
+                        f'{path}: Match LocalPort policy needs manual migration '
+                        f'before switching SSH to {port}; SSH configs were not changed.')
+        if match and match[1].lower() == 'include':
+            for pattern in shlex.split(match[2], comments=True):
+                pattern = Path(pattern)
+                if not pattern.is_absolute():
+                    pattern = include_base / pattern
+                for included in sorted(glob.glob(str(pattern))):
+                    read_config(Path(included))
+
+
+read_config(main)
+changes = {}
+for path, original in files.items():
+    text = original
+    if path == main and text.startswith(marker):
+        text = text[len(marker):].split('\n', 1)[1].lstrip('\n')
+    lines = []
+    for line in text.splitlines(keepends=True):
+        match = directive.match(line)
+        key = match[1].lower() if match else ''
+        if key == 'port':
+            line = '# debian12-init disabled old port: ' + line.lstrip()
+        elif key == 'listenaddress':
+            tokens = shlex.split(match[2], comments=True)
+            address = tokens[0]
+            if re.fullmatch(r'\[[^\]]+\]:[0-9]+', address) or re.fullmatch(r'[^:]+:[0-9]+', address):
+                tokens[0] = address.rsplit(':', 1)[0] + ':' + port
+                line = 'ListenAddress ' + ' '.join(tokens) + '\n'
+        lines.append(line)
+    updated = ''.join(lines)
+    if path == main:
+        updated = marker + 'Port ' + port + '\n\n' + updated
+    if updated != original:
+        changes[path] = updated
+
+# Prepare every backup before writing any config, including files outside the
+# usual config.d directory that are reached through Include directives.
+backup.mkdir(parents=True, mode=0o700, exist_ok=True)
+records = []
+for index, path in enumerate(changes):
+    name = f'{index}.conf'
+    shutil.copy2(path, backup / name)
+    records.append({'path': str(path), 'backup': name})
+manifest.write_text(json.dumps(records, indent=2) + '\n')
+for path, updated in changes.items():
+    path.write_text(updated)
+SSH_CONFIG_PYTHON
+}
+
+configure_ssh_port() {
+    local config=/etc/ssh/sshd_config backup ready=0 ssh_pid
+    local service_active=0 service_enabled=0 socket_active=0 socket_enabled=0 socket_loaded=0
+    log "Configuring SSH on TCP $SSH_PORT; allow this port in the cloud security group and local firewall"
+    install -d -m 755 /run/sshd
+    /usr/sbin/sshd -t || die 'Existing SSH config is invalid; correct it before changing the port.'
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    backup="/root/.config/debian12-init/ssh-backup-$(date +%Y%m%d-%H%M%S)-$$"
+    install -d -m 700 "$backup"
+    if systemctl is-active --quiet ssh.service; then service_active=1; fi
+    if systemctl is-enabled --quiet ssh.service; then service_enabled=1; fi
+    if [[ $(systemctl show -p LoadState --value ssh.socket) == loaded ]]; then
+        socket_loaded=1
+        if systemctl is-active --quiet ssh.socket; then socket_active=1; fi
+        if systemctl is-enabled --quiet ssh.socket; then socket_enabled=1; fi
+    fi
+    if [[ $socket_active == 1 && $service_active == 1 ]]; then
+        [[ $(systemctl show -p KillMode --value ssh.service) == process ]] ||
+            die 'Socket-activated SSH migration requires ssh.service KillMode=process to preserve current sessions.'
+    fi
+    if rewrite_ssh_port configure "$config" "$backup" "$SSH_PORT" &&
+       /usr/sbin/sshd -t && /usr/sbin/sshd -T > "$WORK_DIR/ssh-effective.conf" &&
+       awk -v port="$SSH_PORT" '
+           $1 == "port" { found=1; if ($2 != port) bad=1 }
+           $1 == "listenaddress" && $2 !~ (":" port "$") { bad=1 }
+           END { exit (!found || bad) }
+       ' "$WORK_DIR/ssh-effective.conf" &&
+       { [[ $socket_loaded == 0 ]] || systemctl disable --now ssh.socket; } &&
+       systemctl enable ssh.service &&
+       { if [[ $service_active == 1 && $socket_active == 0 ]]; then
+             systemctl reload ssh.service
+         elif [[ $service_active == 1 ]]; then
+             # Drop inherited socket FDs; Debian's KillMode=process leaves all
+             # established SSH session processes running during this restart.
+             systemctl restart ssh.service
+         else
+             systemctl start ssh.service
+         fi; }; then
+        for _ in {1..15}; do
+            ssh_pid=$(systemctl show -p MainPID --value ssh.service)
+            if systemctl is-active --quiet ssh.service &&
+               systemctl is-enabled --quiet ssh.service &&
+               ss -ltnpH | awk -v pid="$ssh_pid" -v port="$SSH_PORT" '
+                   $0 ~ ("pid=" pid ",") { found=1; if ($4 !~ (":" port "$")) bad=1 }
+                   END { exit (!found || bad) }
+               '; then
+                ready=1
+                break
+            fi
+            sleep 1
+        done
+    fi
+    if [[ $ready != 1 ]]; then
+        log 'SSH port change failed; restoring the previous configuration'
+        rewrite_ssh_port restore "$config" "$backup" "$SSH_PORT"
+        if /usr/sbin/sshd -t; then
+            if [[ $socket_active == 1 ]]; then
+                systemctl stop ssh.service || true
+                systemctl start ssh.socket || true
+                if [[ $service_active == 1 ]]; then systemctl start ssh.service || true; fi
+            elif [[ $service_active == 1 ]]; then
+                systemctl reload ssh.service || systemctl start ssh.service || true
+            else
+                systemctl stop ssh.service || true
+            fi
+        fi
+        if [[ $service_enabled == 0 ]]; then systemctl disable ssh.service || true; fi
+        if [[ $socket_enabled == 1 ]]; then systemctl enable ssh.socket || true; fi
+        journalctl -u ssh.service -n 20 --no-pager >&2
+        die "SSH port change failed; backups are at $backup. Check /etc/default/ssh and systemd overrides for command-line port settings."
+    fi
+    log "SSH is listening on TCP $SSH_PORT and enabled at boot; current SSH sessions remain connected"
+    log "SSH config backups: $backup"
 }
 
 ensure_chrome_key() {
@@ -279,6 +443,7 @@ install_trojan() {
 [[ $DESKTOP_USER =~ ^[a-z_][a-z0-9_-]{0,30}$ && $DESKTOP_USER != root ]] || die 'Invalid DESKTOP_USER.'
 [[ $PANEL_PORT =~ ^[0-9]{2,5}$ ]] && (( PANEL_PORT >= 1024 && PANEL_PORT <= 65535 )) || die 'Invalid PANEL_PORT.'
 [[ $PANEL_PORT -ne $VNC_PORT ]] || die 'PANEL_PORT conflicts with VNC.'
+[[ $PANEL_PORT -ne $SSH_PORT ]] || die 'PANEL_PORT conflicts with SSH.'
 [[ $INSTALL_DOCKER == 0 || $INSTALL_DOCKER == 1 ]] || die 'INSTALL_DOCKER must be 0 or 1.'
 [[ $INSTALL_OPENRESTY == 0 || $INSTALL_OPENRESTY == 1 ]] || die 'INSTALL_OPENRESTY must be 0 or 1.'
 [[ $INSTALL_OPENRESTY == 0 || $INSTALL_DOCKER == 1 ]] || die 'OpenResty requires Docker (set INSTALL_DOCKER=1).'
@@ -287,7 +452,7 @@ install_trojan() {
 if [[ $INSTALL_TROJAN == 1 ]]; then
     [[ $TROJAN_PORT =~ ^[1-9][0-9]{3,4}$ ]] && (( TROJAN_PORT >= 1024 && TROJAN_PORT <= 65535 )) || die 'Invalid TROJAN_PORT.'
     [[ $TROJAN_PORT -ne $PANEL_PORT && $TROJAN_PORT -ne $VNC_PORT &&
-       $TROJAN_PORT -ne $OPENRESTY_HTTPS_PORT ]] || die 'TROJAN_PORT conflicts with another configured service.'
+       $TROJAN_PORT -ne $OPENRESTY_HTTPS_PORT && $TROJAN_PORT -ne $SSH_PORT ]] || die 'TROJAN_PORT conflicts with another configured service.'
 fi
 
 # Ask before DNS changes, apt, or any other system mutation. /dev/tty also
@@ -332,11 +497,13 @@ if [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
 fi
 log 'Installing base utilities'
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl expect tzdata procps tmux htop vim python3 python3-cryptography xz-utils systemd-resolved
+apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl openssh-server expect tzdata procps tmux htop vim python3 python3-cryptography xz-utils systemd-resolved
 if [[ $DNS_BOOTSTRAPPED == 1 ]]; then
     activate_public_dns
     timeout 15 getent ahostsv4 deb.debian.org >/dev/null || die 'systemd-resolved cannot resolve deb.debian.org after installation.'
 fi
+
+configure_ssh_port
 
 log 'Setting vm.swappiness=60'
 [[ -e /etc/sysctl.conf ]] || install -m 644 /dev/null /etc/sysctl.conf
@@ -1050,12 +1217,12 @@ PYTHON
 fi
 
 PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')}
-# An SSH session exposes the server port as the last SSH_CONNECTION field.
-# SSH_TUNNEL_PORT can override it when the script runs from a local console.
-SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT:-${SSH_CONNECTION:-}}
-SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT##* }
-[[ $SSH_TUNNEL_PORT =~ ^[0-9]{1,5}$ ]] || SSH_TUNNEL_PORT=22
+# A session established before SSH was reloaded can still report the old port.
+# Only an explicit external NAT port should override the configured port here.
+SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT:-$SSH_PORT}
+[[ $SSH_TUNNEL_PORT =~ ^[0-9]{1,5}$ ]] || SSH_TUNNEL_PORT=$SSH_PORT
 printf '\n===== Setup complete =====\n'
+printf 'SSH port: %s\nSSH connection: ssh -p %s root@%s\n' "$SSH_PORT" "$SSH_TUNNEL_PORT" "$PANEL_PUBLIC_IP"
 printf 'Public DNS: 1.1.1.1, 8.8.8.8 (systemd-resolved; more specific per-link DNS routes preserved)\n'
 printf 'Swap tendency: vm.swappiness=%s\n' "$(sysctl -n vm.swappiness)"
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
