@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian 12: 1Panel, Docker, OpenResty, Node.js, XFCE, Chrome, and loopback-only TigerVNC.
+# Debian 12: 1Panel, Docker, OpenResty, Trojan, Node.js, XFCE, Chrome, and TigerVNC.
 set -Eeuo pipefail
 umask 077
 
@@ -17,6 +17,12 @@ OPENRESTY_HTTPS_PORT=18443
 STREAM_CONFIG_DIR=$PANEL_DATA_DIR/www/stream.d
 INSTALL_DOCKER=${INSTALL_DOCKER:-1}
 INSTALL_OPENRESTY=${INSTALL_OPENRESTY:-$INSTALL_DOCKER}
+INSTALL_TROJAN=${INSTALL_TROJAN:-1}
+TROJAN_PORT=${TROJAN_PORT:-8443}
+TROJAN_DOMAIN=
+TROJAN_PASSWORD=
+TROJAN_CREDENTIALS_FILE=/root/.config/debian12-init/trojan
+TROJAN_TLS_DIR=/etc/trojan/tls
 SERVER_TIMEZONE=${SERVER_TIMEZONE:-auto}
 DATE_LOCALE=${DATE_LOCALE:-auto}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
@@ -101,6 +107,172 @@ install_node() {
     npm --version
 }
 
+valid_trojan_domain() {
+    local domain=$1 label
+    local -a labels
+    [[ ${#domain} -le 253 && $domain == *.* && $domain != *..* &&
+       $domain != .* && $domain != *. && ${domain##*.} =~ [a-z] ]] || return 1
+    IFS=. read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        [[ $label =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+    done
+}
+
+prompt_trojan_domain() {
+    [[ $INSTALL_TROJAN == 1 ]] || return 0
+    local input_fd answer prompt
+    if [[ -e $TROJAN_CREDENTIALS_FILE ]]; then
+        [[ $(stat -c '%u:%a' "$TROJAN_CREDENTIALS_FILE") == "$EUID:600" ]] ||
+            die "$TROJAN_CREDENTIALS_FILE must be owned by root with mode 600."
+        # shellcheck source=/dev/null
+        source "$TROJAN_CREDENTIALS_FILE"
+        valid_trojan_domain "$TROJAN_DOMAIN" || die 'Invalid saved Trojan domain.'
+        [[ $TROJAN_PASSWORD =~ ^[0-9a-f]{48}$ ]] || die 'Invalid saved Trojan password.'
+    fi
+    if [[ -t 0 ]]; then
+        input_fd=0
+    elif ! { exec {input_fd}</dev/tty; } 2>/dev/null; then
+        die 'Trojan domain input requires a terminal. Download the script, then run bash debian12-init.sh interactively (or set INSTALL_TROJAN=0).'
+    fi
+    printf '\nTrojan 使用自签证书，监听 TCP %s。请将域名解析到本机，并放行该端口。\n' "$TROJAN_PORT"
+    while true; do
+        prompt='请输入 Trojan 域名（不含 https://、端口或路径）'
+        [[ -z $TROJAN_DOMAIN ]] || prompt+=" [$TROJAN_DOMAIN]"
+        if ! read -r -u "$input_fd" -p "$prompt: " answer; then
+            die 'Trojan domain input cancelled; installation has not started.'
+        fi
+        answer=${answer:-$TROJAN_DOMAIN}
+        answer=${answer,,}
+        answer=${answer%.}
+        if valid_trojan_domain "$answer"; then
+            TROJAN_DOMAIN=$answer
+            break
+        fi
+        printf '域名无效，请输入完整域名；不能使用 IP、URL 或通配符。\n' >&2
+    done
+    if [[ $input_fd != 0 ]]; then exec {input_fd}<&-; fi
+    log "Trojan domain: $TROJAN_DOMAIN; TCP port: $TROJAN_PORT"
+}
+
+save_trojan_credentials() {
+    [[ -n $TROJAN_PASSWORD ]] || TROJAN_PASSWORD=$(openssl rand -hex 24)
+    install -d -m 700 "$(dirname -- "$TROJAN_CREDENTIALS_FILE")"
+    printf 'TROJAN_DOMAIN=%q\nTROJAN_PASSWORD=%q\n' \
+        "$TROJAN_DOMAIN" "$TROJAN_PASSWORD" > "$TROJAN_CREDENTIALS_FILE"
+    chmod 600 "$TROJAN_CREDENTIALS_FILE"
+}
+
+generate_trojan_certificate() {
+    local cert="$TROJAN_TLS_DIR/server.crt" key="$TROJAN_TLS_DIR/server.key" backup common_name=$TROJAN_DOMAIN
+    install -d -m 700 "$TROJAN_TLS_DIR"
+    if [[ -s $cert && -s $key ]] &&
+       openssl x509 -in "$cert" -noout -checkend 2592000 >/dev/null 2>&1 &&
+       openssl verify -CAfile "$cert" -verify_hostname "$TROJAN_DOMAIN" "$cert" >/dev/null 2>&1 &&
+       [[ $(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null) == \
+          "$(openssl pkey -in "$key" -passin pass: -pubout 2>/dev/null)" ]]; then
+        chmod 600 "$cert" "$key"
+        log "Keeping the existing self-signed Trojan certificate for $TROJAN_DOMAIN"
+        return
+    fi
+    log "Generating a self-signed Trojan certificate for $TROJAN_DOMAIN (3650 days)"
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    # X.509 common names are limited to 64 bytes; SAN carries the full domain.
+    (( ${#common_name} <= 64 )) || common_name='Trojan server'
+    openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+        -keyout "$WORK_DIR/trojan-server.key" -out "$WORK_DIR/trojan-server.crt" \
+        -subj "/CN=$common_name" -addext "subjectAltName=DNS:$TROJAN_DOMAIN" \
+        -addext 'basicConstraints=critical,CA:FALSE' \
+        -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+        -addext 'extendedKeyUsage=serverAuth' 2> "$WORK_DIR/trojan-cert.log" || {
+            cat "$WORK_DIR/trojan-cert.log" >&2
+            die 'Could not generate the self-signed Trojan certificate.'
+        }
+    if [[ -e $cert || -e $key ]]; then
+        backup="$TROJAN_TLS_DIR/backup-$(date +%Y%m%d-%H%M%S)-$$"
+        install -d -m 700 "$backup"
+        [[ ! -e $cert ]] || cp -a -- "$cert" "$backup/server.crt"
+        [[ ! -e $key ]] || cp -a -- "$key" "$backup/server.key"
+        log "Previous Trojan certificate and key preserved at $backup"
+    fi
+    install -m 600 "$WORK_DIR/trojan-server.crt" "$cert"
+    install -m 600 "$WORK_DIR/trojan-server.key" "$key"
+}
+
+write_trojan_config() {
+    local config=$1 dropin=$2
+    install -d -m 755 "$(dirname -- "$config")" "$(dirname -- "$dropin")"
+    cat > "$config" <<EOF
+{
+    "run_type": "server",
+    "local_addr": "0.0.0.0",
+    "local_port": $TROJAN_PORT,
+    "remote_addr": "127.0.0.1",
+    "remote_port": 80,
+    "password": ["$TROJAN_PASSWORD"],
+    "log_level": 1,
+    "ssl": {
+        "cert": "/run/credentials/trojan.service/fullchain.pem",
+        "key": "/run/credentials/trojan.service/privkey.pem",
+        "alpn": ["http/1.1"]
+    }
+}
+EOF
+    chmod 600 "$config"
+    # The Debian service runs as nobody. systemd supplies private copies of the
+    # config and certificate files without opening up the private key.
+    cat > "$dropin" <<EOF
+[Service]
+LoadCredential=config.json:$config
+LoadCredential=fullchain.pem:$TROJAN_TLS_DIR/server.crt
+LoadCredential=privkey.pem:$TROJAN_TLS_DIR/server.key
+ExecStart=
+ExecStart=/usr/bin/trojan %d/config.json
+EOF
+    chmod 644 "$dropin"
+}
+
+install_trojan() {
+    [[ $INSTALL_TROJAN == 1 ]] || return 0
+    local tls_ready=0
+    log "Installing Trojan with self-signed TLS for $TROJAN_DOMAIN:$TROJAN_PORT"
+    if command -v trojan >/dev/null 2>&1 && [[ ! -e $TROJAN_CREDENTIALS_FILE ]]; then
+        die 'An unmanaged Trojan installation exists; migrate its config before using this installer.'
+    fi
+    # Save the password before network work so an interrupted run can resume.
+    save_trojan_credentials
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    generate_trojan_certificate
+    write_trojan_config /etc/trojan/debian12-init.json \
+        /etc/systemd/system/trojan.service.d/credentials.conf
+    # Install the override before the package so its post-install start uses our
+    # valid config, rather than the packaged example listening on port 443.
+    systemctl daemon-reload
+    apt-get install -y --no-install-recommends trojan
+    systemctl daemon-reload
+    systemctl enable trojan.service
+    if ! systemctl restart trojan.service; then
+        journalctl -u trojan.service -n 30 --no-pager >&2
+        die 'Trojan could not start; check its config and whether the port is occupied.'
+    fi
+    for _ in {1..15}; do
+        if timeout 8 openssl s_client -connect "127.0.0.1:$TROJAN_PORT" \
+            -servername "$TROJAN_DOMAIN" -verify_hostname "$TROJAN_DOMAIN" \
+            -CAfile "$TROJAN_TLS_DIR/server.crt" -verify_return_error \
+            </dev/null > "$WORK_DIR/trojan-tls-check.log" 2>&1; then
+            tls_ready=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ $tls_ready != 1 ]]; then
+        cat "$WORK_DIR/trojan-tls-check.log" >&2
+        journalctl -u trojan.service -n 30 --no-pager >&2
+        die 'Trojan TLS verification failed.'
+    fi
+    systemctl is-active --quiet trojan.service || die 'Trojan service is not active.'
+    systemctl is-enabled --quiet trojan.service || die 'Trojan service is not enabled at boot.'
+}
+
 [[ $EUID -eq 0 ]] || die 'Run this script as root.'
 [[ $(. /etc/os-release; printf '%s' "$ID:$VERSION_ID") == debian:12 ]] || die 'Debian 12 is required.'
 [[ $(uname -m) == x86_64 ]] || die 'This script currently supports x86_64 only (Chrome amd64 package).'
@@ -111,6 +283,16 @@ install_node() {
 [[ $INSTALL_OPENRESTY == 0 || $INSTALL_OPENRESTY == 1 ]] || die 'INSTALL_OPENRESTY must be 0 or 1.'
 [[ $INSTALL_OPENRESTY == 0 || $INSTALL_DOCKER == 1 ]] || die 'OpenResty requires Docker (set INSTALL_DOCKER=1).'
 [[ $VNC_GEOMETRY =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die 'Invalid VNC_GEOMETRY (expected WIDTHxHEIGHT).'
+[[ $INSTALL_TROJAN == 0 || $INSTALL_TROJAN == 1 ]] || die 'INSTALL_TROJAN must be 0 or 1.'
+if [[ $INSTALL_TROJAN == 1 ]]; then
+    [[ $TROJAN_PORT =~ ^[1-9][0-9]{3,4}$ ]] && (( TROJAN_PORT >= 1024 && TROJAN_PORT <= 65535 )) || die 'Invalid TROJAN_PORT.'
+    [[ $TROJAN_PORT -ne $PANEL_PORT && $TROJAN_PORT -ne $VNC_PORT &&
+       $TROJAN_PORT -ne $OPENRESTY_HTTPS_PORT ]] || die 'TROJAN_PORT conflicts with another configured service.'
+fi
+
+# Ask before DNS changes, apt, or any other system mutation. /dev/tty also
+# supports curl | bash when run from an interactive SSH terminal.
+prompt_trojan_domain
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -487,6 +669,8 @@ for attempt in {1..15}; do
     sleep 1
 done
 ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
+
+install_trojan
 
 # Install the panel stack last so desktop access is ready before this stage.
 if ! command -v 1pctl >/dev/null 2>&1; then
@@ -884,6 +1068,15 @@ printf '1Panel URL via tunnel: http://127.0.0.1:%s/%s\n' "$PANEL_PORT" "$PANEL_E
 printf '1Panel account: %s\n1Panel password: %s\n' "$PANEL_USER" "$PANEL_PASSWORD"
 if [[ $INSTALL_OPENRESTY == 1 ]]; then
     printf 'OpenResty HTTPS: %s\nTLS stream config: %s\n' "$OPENRESTY_HTTPS_PORT" "$STREAM_CONFIG_DIR/tls-forward-443.conf"
+fi
+if [[ $INSTALL_TROJAN == 1 ]]; then
+    printf 'Trojan server/SNI: %s\nTrojan TCP port: %s\nTrojan password: %s\n' "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_PASSWORD"
+    printf 'Spectre import: trojan://%s@%s:%s?security=tls&sni=%s#Trojan\n' \
+        "$TROJAN_PASSWORD" "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_DOMAIN"
+    printf 'Trojan certificate: %s/server.crt (self-signed; 3650 days)\n' "$TROJAN_TLS_DIR"
+    openssl x509 -in "$TROJAN_TLS_DIR/server.crt" -noout -sha256 -fingerprint
+    printf 'Spectre: TLS enabled; trust/pin the certificate if supported, otherwise enable skip certificate verification. Allow inbound TCP %s.\n' "$TROJAN_PORT"
+    printf 'Trojan credentials: %s\n' "$TROJAN_CREDENTIALS_FILE"
 fi
 printf 'Desktop user: %s\nVNC authentication: none (loopback only)\n' "$DESKTOP_USER"
 printf 'VNC tunnel: ssh -p %s -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n' "$SSH_TUNNEL_PORT"
