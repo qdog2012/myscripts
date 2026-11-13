@@ -50,6 +50,27 @@ activate_public_dns() {
     systemctl is-enabled --quiet systemd-resolved.service || die 'systemd-resolved is not enabled at boot.'
 }
 
+disable_cloud_agents() {
+    log 'Disabling Alibaba Cloud Assistant, its watchdog, and cloud monitoring when installed'
+    CLOUD_AGENT_WARNINGS=()
+    local agent unit
+    # Stop the watchdog first so it cannot restart the main assistant service.
+    for agent in AssistDaemon aliyun cloudmonitor; do
+        unit="$agent.service"
+        if [[ $(systemctl show -p LoadState --value "$unit") == loaded ]]; then
+            if ! systemctl disable --now "$unit"; then
+                CLOUD_AGENT_WARNINGS+=("$unit")
+                log "WARNING: $unit refused to disable; check the provider's agent protection settings"
+            elif systemctl is-enabled --quiet "$unit" || systemctl is-active --quiet "$unit"; then
+                CLOUD_AGENT_WARNINGS+=("$unit")
+                log "WARNING: $unit is still enabled or active"
+            else
+                log "$unit disabled and stopped"
+            fi
+        fi
+    done
+}
+
 rewrite_ssh_port() {
     python3 - "$@" <<'SSH_CONFIG_PYTHON'
 import glob
@@ -516,22 +537,7 @@ fi
 sysctl -w vm.swappiness=60
 [[ $(sysctl -n vm.swappiness) == 60 ]] || die 'vm.swappiness did not become 60.'
 
-log 'Disabling Alibaba Cloud agents when installed'
-CLOUD_AGENT_WARNINGS=()
-for agent in cloudmonitor aliyun; do
-    unit="$agent.service"
-    if [[ $(systemctl show -p LoadState --value "$unit") == loaded ]]; then
-        if ! systemctl disable --now "$unit"; then
-            CLOUD_AGENT_WARNINGS+=("$unit")
-            log "WARNING: $unit refused to disable; check the provider's agent protection settings"
-        elif systemctl is-enabled --quiet "$unit" || systemctl is-active --quiet "$unit"; then
-            CLOUD_AGENT_WARNINGS+=("$unit")
-            log "WARNING: $unit is still enabled or active"
-        else
-            log "$unit disabled and stopped"
-        fi
-    fi
-done
+disable_cloud_agents
 
 if ! grep -Fq '# debian12-init interactive aliases' /etc/bash.bashrc; then
     cat >> /etc/bash.bashrc <<'ALIASES'
@@ -604,18 +610,20 @@ else
     PANEL_PASSWORD=$(openssl rand -hex 12)
 fi
 
-log 'Installing the minimal XFCE session and TigerVNC'
+log 'Installing the minimal English XFCE session and TigerVNC (with Chinese fonts)'
 apt-get install -y --no-install-recommends \
     xfce4-session xfce4-panel xfdesktop4 xfwm4 xfce4-terminal thunar \
     dbus-x11 tigervnc-standalone-server fonts-dejavu-core fonts-wqy-microhei locales
 
-if ! locale -a | grep -qi '^zh_CN\.utf8$'; then
-    sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
-    grep -q '^zh_CN.UTF-8 UTF-8$' /etc/locale.gen || printf 'zh_CN.UTF-8 UTF-8\n' >> /etc/locale.gen
-    locale-gen zh_CN.UTF-8
-fi
+for ui_locale in en_US zh_CN; do
+    if ! locale -a | grep -qi "^${ui_locale}\.utf8$"; then
+        sed -i "s/^# *${ui_locale}.UTF-8 UTF-8/${ui_locale}.UTF-8 UTF-8/" /etc/locale.gen
+        grep -Fqx "$ui_locale.UTF-8 UTF-8" /etc/locale.gen || printf '%s.UTF-8 UTF-8\n' "$ui_locale" >> /etc/locale.gen
+        locale-gen "$ui_locale.UTF-8"
+    fi
+done
 
-# LC_TIME controls date formatting separately from the Chinese desktop UI.
+# LC_TIME controls regional date formatting separately from the English UI.
 date_locale_for_country() {
     local country=$1 language=en base
     [[ $country =~ ^[A-Z]{2}$ ]] || return 1
@@ -648,7 +656,7 @@ date_locale_for_country() {
 }
 
 SELECTED_DATE_LOCALE=$(sed -nE 's/^LC_TIME="?([^"[:space:]]+)"?$/\1/p' /etc/default/locale | tail -n 1)
-SELECTED_DATE_LOCALE=${SELECTED_DATE_LOCALE:-zh_CN.UTF-8}
+SELECTED_DATE_LOCALE=${SELECTED_DATE_LOCALE:-en_US.UTF-8}
 APPLY_DATE_LOCALE=0
 if [[ $DATE_LOCALE == auto ]]; then
     COUNTRY_CODE=
@@ -697,6 +705,10 @@ cat > "$DESKTOP_HOME/.vnc/xstartup" <<'XSTARTUP'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+unset LC_ALL
+export LANG=en_US.UTF-8
+export LANGUAGE=en_US:en
+export LC_MESSAGES=en_US.UTF-8
 exec dbus-launch --exit-with-session startxfce4
 XSTARTUP
 chown "$DESKTOP_USER:$DESKTOP_USER" "$DESKTOP_HOME/.vnc/xstartup"
@@ -715,9 +727,11 @@ User=$DESKTOP_USER
 Group=$DESKTOP_USER
 WorkingDirectory=$DESKTOP_HOME
 Environment=HOME=$DESKTOP_HOME
-Environment=LANG=zh_CN.UTF-8
-Environment=LANGUAGE=zh_CN:zh
+Environment=LANG=en_US.UTF-8
+Environment=LANGUAGE=en_US:en
+Environment=LC_MESSAGES=en_US.UTF-8
 Environment=LC_TIME=$SELECTED_DATE_LOCALE
+UnsetEnvironment=LC_ALL
 ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -fg -localhost yes -rfbport $VNC_PORT -geometry $VNC_GEOMETRY -depth 24 -SecurityTypes None
 ExecStop=-/usr/bin/tigervncserver -kill $VNC_DISPLAY
 Restart=on-failure
@@ -761,6 +775,12 @@ chmod 644 /etc/opt/chrome/policies/managed/20-low-resource.json
 cat > /usr/local/bin/chrome-low-resource <<'CHROME'
 #!/bin/sh
 # Keep background work and renderer fan-out small; preserve Chrome's sandbox.
+# Linux Chrome follows the process locale. LC_ALL would override LC_MESSAGES
+# and the separately selected regional date locale, so remove that override.
+unset LC_ALL
+export LANG=en_US.UTF-8
+export LANGUAGE=en_US:en
+export LC_MESSAGES=en_US.UTF-8
 # Chrome treats a lock from an old host name as another machine using the
 # profile. Clear stale symlinks only when this user has no Chrome process.
 profile_dir=${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome
@@ -782,6 +802,7 @@ if [ -L "$lock_file" ]; then
     esac
 fi
 exec /usr/bin/google-chrome-stable \
+    --lang=en-US \
     --no-first-run \
     --no-default-browser-check \
     --disable-background-mode \
@@ -1227,6 +1248,7 @@ printf 'Public DNS: 1.1.1.1, 8.8.8.8 (systemd-resolved; more specific per-link D
 printf 'Swap tendency: vm.swappiness=%s\n' "$(sysctl -n vm.swappiness)"
 printf 'System time zone: %s\n' "$(timedatectl show -p Timezone --value)"
 printf 'Date locale: %s\n' "$SELECTED_DATE_LOCALE"
+printf 'Desktop and Chrome UI language: English (en_US.UTF-8; Chinese fonts installed)\n'
 printf 'Node.js: %s (%s)\n' "$(node --version)" "$NODE_INSTALL_DIR"
 printf '1Panel directory: %s\n' "$PANEL_DATA_DIR"
 printf '1Panel URL: http://%s:%s/%s\n' "$PANEL_PUBLIC_IP" "$PANEL_PORT" "$PANEL_ENTRANCE"
