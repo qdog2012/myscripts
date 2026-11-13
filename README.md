@@ -61,9 +61,12 @@ own process. An existing installation of the same version is reused, preserving
 global npm packages. A different installation is backed up before replacement;
 its global packages remain in that backup and are not migrated automatically.
 
-If present, the script stops and disables the Alibaba Cloud `cloudmonitor` and
-`aliyun` services. This also disables their cloud monitoring and remote-assistance
-features. Aegis is left to manual management through the Alibaba Cloud console.
+If present, the script stops and disables the Alibaba Cloud Assistant watchdog
+`AssistDaemon.service` first, then its main `aliyun.service`, and
+`cloudmonitor.service`. Stopping the watchdog first prevents it from restarting
+the assistant. This disables cloud-console command execution, remote assistance,
+and cloud monitoring provided by these agents. Aegis is left to manual
+management through the Alibaba Cloud console.
 If an agent refuses to disable, the script reports it for manual action and
 continues the rest of the setup.
 
@@ -111,8 +114,11 @@ The printed tunnel commands use `2424`, even when the current session was
 opened on the old port. Set `SSH_TUNNEL_PORT` only if an external NAT mapping
 uses a different public port; this affects examples, not the SSH service.
 
-The XFCE session uses `zh_CN.UTF-8` and the lightweight WenQuanYi Micro Hei
-font for Chinese text. Its default resolution is `1680x1050`; set
+The XFCE desktop UI defaults to English (`LANG=en_US.UTF-8`,
+`LANGUAGE=en_US:en`, `LC_MESSAGES=en_US.UTF-8`). The lightweight WenQuanYi Micro
+Hei font and the Chinese UTF-8 locale remain installed for Chinese text.
+`LC_ALL` is cleared so it cannot override the UI language or regional dates.
+Its default resolution is `1680x1050`; set
 `VNC_GEOMETRY=WIDTHxHEIGHT` before running to change it. The 1Panel and VNC
 systemd services are enabled at boot.
 
@@ -130,6 +136,12 @@ SHA-256 checksum. It installs Chrome from Google's signed apt repository and
 disables Chrome's on-device AI model through the managed
 `GenAILocalFoundationalModelSettings` policy. This keeps the setting off for all
 Chrome profiles and shows it as managed in Chrome settings.
+
+The desktop Chrome launcher also sets the English locale and passes
+`--lang=en-US`, including when an existing Chinese shell environment launches
+it. It preserves the selected `LC_TIME` date locale. Rerunning the installer
+restarts the VNC session with the English desktop settings; restart Chrome
+to apply the launcher language to an existing browser process.
 
 The script also writes `/etc/opt/chrome/policies/managed/20-low-resource.json`
 with these mandatory policies for existing and future Chrome profiles:
@@ -164,7 +176,7 @@ Set `SERVER_TIMEZONE=Asia/Shanghai` to choose an IANA time zone explicitly, or
 
 The script also selects a date-format locale from the public IP's country. It
 sets `LC_TIME` for the system and XFCE session while keeping the desktop UI in
-Chinese. It also sets the XFCE panel clock to `%x`, so its visible date follows
+English. It also sets the XFCE panel clock to `%x`, so its visible date follows
 `LC_TIME`. If geolocation fails, it keeps the prior date locale. Set
 `DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
 `DATE_LOCALE=keep` to preserve the current date locale.
