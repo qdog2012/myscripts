@@ -106,6 +106,30 @@ write_frpc_config "$1" "$2"
             self.assertEqual(updated['auth']['token'], 'rotated-frps-token')
             self.assertEqual([proxy['secretKey'] for proxy in updated['proxies']], [key] * 3)
 
+    def test_printed_visitor_config_matches_local_proxies_and_key(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / 'frpc.toml'
+            script = PREAMBLE + '''
+FRPC_SERVER_IP=192.0.2.24
+SERVER_PREFIX=example-3
+FRPC_TOKEN='test-frps-auth-token'
+write_frpc_config "$1"
+print_frpc_visitors "$1"
+'''
+            result = subprocess.run(
+                ['bash', '-c', script, 'test-frpc', str(config)],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            local = tomllib.loads(config.read_text())
+            keys = {proxy['name']: proxy['secretKey'] for proxy in local['proxies']}
+            self.assertEqual(tomllib.loads(result.stdout)['visitors'], [
+                {'name': name, 'type': 'stcp', 'serverName': name, 'secretKey': keys[name],
+                 'bindAddr': '0.0.0.0', 'bindPort': port}
+                for name, port in [('example-3_vnc', 9108), ('example-3_api', 4005),
+                                   ('example-3_https', 9205)]
+            ])
+            self.assertNotIn(local['auth']['token'], result.stdout)
+
     def test_disabled_client_never_prompts_or_installs(self):
         result = subprocess.run(
             ['bash', '-c', PREAMBLE + '\nINSTALL_FRPC=0\nprompt_frpc_settings\ninstall_frpc'],

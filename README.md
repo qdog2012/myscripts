@@ -258,17 +258,21 @@ must accept QUIC on that port and use the token entered at startup.
 
 The local server prefix is used for the STCP proxy names:
 
-| Proxy name | Local destination |
-| --- | --- |
-| `<name>_vnc` | `127.0.0.1:5901` |
-| `<name>_https` | `127.0.0.1:18443` |
-| `<name>_api` | `127.0.0.1:443` |
+| Proxy name | Local destination | Visitor port |
+| --- | --- | --- |
+| `<name>_vnc` | `127.0.0.1:5901` | `9108` |
+| `<name>_api` | `127.0.0.1:443` | `4005` |
+| `<name>_https` | `127.0.0.1:18443` | `9205` |
 
 All three STCP proxies share one randomly generated 32-character `secretKey`.
 The entered token authenticates the client to the FRP server. The script stores
 both values in `/serverdata/service/frp/frpc.toml` with mode `0600`. Existing
 visitors that used the token as their `secretKey` need the new key when you first
 apply this update. Subsequent runs reuse the generated key.
+
+The setup summary prints three `[[visitors]]` blocks with the actual proxy names
+and shared STCP key. Add these blocks to the visitor's `frpc.toml`. Each visitor
+listens on `0.0.0.0` at the port shown in the table.
 
 On a rerun, changed settings replace the generated config and the previous file
 is preserved in a private `backup.*` directory next to it. `frpc.service` starts at boot and retries if

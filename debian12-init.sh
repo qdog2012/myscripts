@@ -559,6 +559,24 @@ print(key)
 FRPC_STCP_PYTHON
 }
 
+print_frpc_visitors() {
+    local mapping name stcp_key
+    stcp_key=$(existing_frpc_stcp_key "$1") || return 1
+    for mapping in vnc:9108 api:4005 https:9205; do
+        name="${SERVER_PREFIX}_${mapping%:*}"
+        cat <<EOF
+
+[[visitors]]
+name = "$name"
+type = "stcp"
+serverName = "$name"
+secretKey = "$stcp_key"
+bindAddr = "0.0.0.0"
+bindPort = ${mapping##*:}
+EOF
+    done
+}
+
 write_frpc_config() {
     local token=${FRPC_TOKEN//\\/\\\\}
     local previous_config=${2:-$1} stcp_key=
@@ -1477,6 +1495,10 @@ if [[ $INSTALL_FRPC == 1 ]]; then
     printf '\nFRP client: frpc.service (enabled at boot)\nFRP server: %s:%s (QUIC UDP)\n' "$FRPC_SERVER_IP" "$FRPC_SERVER_PORT"
     printf 'FRP proxies: %s_vnc, %s_https, %s_api\n' "$SERVER_PREFIX" "$SERVER_PREFIX" "$SERVER_PREFIX"
     printf 'FRP config and STCP key: %s/frpc.toml (root only)\nFRP connection log: journalctl -u frpc.service -n 30 --no-pager\n' "$FRPC_DIR"
+    printf '\nFRP visitor configuration (add to the visitor frpc.toml):\n'
+    if ! print_frpc_visitors "$FRPC_DIR/frpc.toml"; then
+        printf 'Could not read the STCP key. Check %s/frpc.toml.\n' "$FRPC_DIR" >&2
+    fi
 fi
 
 if [[ $INSTALL_TROJAN == 1 ]]; then
