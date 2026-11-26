@@ -20,7 +20,8 @@
 
 ## 一、公网服务器
 
-以 root 执行，安装固定版本 FRP 0.71.0，验证官方发布文件的 SHA256：
+以 root 执行，将 `frps.example.com` 替换为你的公网服务器域名。安装器使用
+FRP 0.71.0，并验证官方发布文件的 SHA256。
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/install-frp-tunnel.sh
