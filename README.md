@@ -116,7 +116,7 @@ uses a different public port; this affects examples, not the SSH service.
 
 The XFCE desktop UI defaults to English (`LANG=en_US.UTF-8`,
 `LANGUAGE=en_US:en`, `LC_MESSAGES=en_US.UTF-8`). The lightweight WenQuanYi Micro
-Hei font and the Chinese UTF-8 locale remain installed for Chinese text.
+Hei font supports Chinese text in XFCE and Chrome.
 `LC_ALL` is cleared so it cannot override the UI language or regional dates.
 Its default resolution is `1680x1050`; set
 `VNC_GEOMETRY=WIDTHxHEIGHT` before running to change it. The 1Panel and VNC
@@ -177,9 +177,9 @@ Set `SERVER_TIMEZONE=Asia/Shanghai` to choose an IANA time zone explicitly, or
 The script also selects a date-format locale from the public IP's country. It
 sets `LC_TIME` for the system and XFCE session while keeping the desktop UI in
 English. It also sets the XFCE panel clock to `%x`, so its visible date follows
-`LC_TIME`. If geolocation fails, it keeps the prior date locale. Set
-`DATE_LOCALE=zh_CN.UTF-8` to override the automatic selection, or
-`DATE_LOCALE=keep` to preserve the current date locale.
+`LC_TIME`. The script generates the chosen date locale as needed. If geolocation
+fails, it keeps the prior date locale. Set `DATE_LOCALE=en_GB.UTF-8` to override
+the automatic selection, or `DATE_LOCALE=keep` to preserve the current date locale.
 
 ## Trojan for Spectre
 
@@ -257,10 +257,14 @@ The local server name is used as the prefix for the STCP proxy names:
 | `<name>_https` | `127.0.0.1:18443` |
 | `<name>_api` | `127.0.0.1:443` |
 
-As in the source configuration, all three STCP keys use the entered token.
-Keep `/serverdata/service/frp/frpc.toml` private. On a rerun, changed settings
-replace the generated config and the previous file is preserved in a private
-`backup.*` directory next to it. `frpc.service` starts at boot and retries if
+All three STCP proxies share one randomly generated 32-character `secretKey`.
+The entered token authenticates the client to the FRP server. The script stores
+both values in `/serverdata/service/frp/frpc.toml` with mode `0600`. Existing
+visitors that used the token as their `secretKey` need the new key when you first
+apply this update. Subsequent runs reuse the generated key.
+
+On a rerun, changed settings replace the generated config and the previous file
+is preserved in a private `backup.*` directory next to it. `frpc.service` starts at boot and retries if
 the connection to the server is unavailable. View registration and connection
 errors with `journalctl -u frpc.service -n 30 --no-pager`. For the HTTPS and API
 proxies to forward traffic, their local listeners need to be running.

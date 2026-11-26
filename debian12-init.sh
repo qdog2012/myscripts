@@ -509,9 +509,36 @@ prompt_frpc_settings() {
     if [[ $input_fd != 0 ]]; then exec {input_fd}<&-; fi
 }
 
+existing_frpc_stcp_key() {
+    python3 - "$1" <<'FRPC_STCP_PYTHON'
+import re
+import sys
+import tomllib
+
+try:
+    with open(sys.argv[1], 'rb') as file:
+        config = tomllib.load(file)
+    keys = {proxy['secretKey'] for proxy in config['proxies'] if proxy['type'] == 'stcp'}
+    key, = keys
+    if key == config['auth']['token'] or not re.fullmatch(r'[A-Za-z0-9+/]{32}', key):
+        raise ValueError('No separate 32-character STCP key')
+except (OSError, KeyError, TypeError, ValueError):
+    sys.exit(1)
+print(key)
+FRPC_STCP_PYTHON
+}
+
 write_frpc_config() {
     local token=${FRPC_TOKEN//\\/\\\\}
+    local previous_config=${2:-$1} stcp_key=
     token=${token//\"/\\\"}
+    if [[ -f $previous_config ]]; then
+        stcp_key=$(existing_frpc_stcp_key "$previous_config") || stcp_key=
+    fi
+    # 24 random bytes encode to 32 Base64 characters without padding.
+    while [[ -z $stcp_key || $stcp_key == "$FRPC_TOKEN" ]]; do
+        stcp_key=$(openssl rand -base64 24)
+    done
     cat > "$1" <<EOF
 serverAddr = "$FRPC_SERVER_IP"
 serverPort = $FRPC_SERVER_PORT
@@ -523,21 +550,21 @@ auth.token = "$token"
 [[proxies]]
 name = "${FRPC_HOST_NAME}_vnc"
 type = "stcp"
-secretKey = "$token"
+secretKey = "$stcp_key"
 localIP = "127.0.0.1"
 localPort = $VNC_PORT
 
 [[proxies]]
 name = "${FRPC_HOST_NAME}_https"
 type = "stcp"
-secretKey = "$token"
+secretKey = "$stcp_key"
 localIP = "127.0.0.1"
 localPort = $OPENRESTY_HTTPS_PORT
 
 [[proxies]]
 name = "${FRPC_HOST_NAME}_api"
 type = "stcp"
-secretKey = "$token"
+secretKey = "$stcp_key"
 localIP = "127.0.0.1"
 localPort = 443
 EOF
@@ -562,7 +589,7 @@ install_frpc() {
         chmod 755 "$binary"
     fi
 
-    write_frpc_config "$WORK_DIR/frpc.toml"
+    write_frpc_config "$WORK_DIR/frpc.toml" "$config"
     unset FRPC_TOKEN
     "$binary" verify -c "$WORK_DIR/frpc.toml" >/dev/null 2>&1 || die 'Generated frpc.toml failed validation.'
 
@@ -762,13 +789,11 @@ apt-get install -y --no-install-recommends \
     xfce4-session xfce4-panel xfdesktop4 xfwm4 xfce4-terminal thunar \
     dbus-x11 tigervnc-standalone-server fonts-dejavu-core fonts-wqy-microhei locales
 
-for ui_locale in en_US zh_CN; do
-    if ! locale -a | grep -qi "^${ui_locale}\.utf8$"; then
-        sed -i "s/^# *${ui_locale}.UTF-8 UTF-8/${ui_locale}.UTF-8 UTF-8/" /etc/locale.gen
-        grep -Fqx "$ui_locale.UTF-8 UTF-8" /etc/locale.gen || printf '%s.UTF-8 UTF-8\n' "$ui_locale" >> /etc/locale.gen
-        locale-gen "$ui_locale.UTF-8"
-    fi
-done
+if ! locale -a | grep -qi '^en_US\.utf8$'; then
+    sed -i 's/^# *en_US\.UTF-8 UTF-8$/en_US.UTF-8 UTF-8/' /etc/locale.gen
+    grep -Fqx 'en_US.UTF-8 UTF-8' /etc/locale.gen || printf 'en_US.UTF-8 UTF-8\n' >> /etc/locale.gen
+    locale-gen en_US.UTF-8
+fi
 
 # LC_TIME controls regional date formatting separately from the English UI.
 date_locale_for_country() {
@@ -1417,7 +1442,7 @@ printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
 if [[ $INSTALL_FRPC == 1 ]]; then
     printf '\nFRP client: frpc.service (enabled at boot)\nFRP server: %s:%s (QUIC UDP)\n' "$FRPC_SERVER_IP" "$FRPC_SERVER_PORT"
     printf 'FRP proxies: %s_vnc, %s_https, %s_api\n' "$FRPC_HOST_NAME" "$FRPC_HOST_NAME" "$FRPC_HOST_NAME"
-    printf 'FRP config: %s/frpc.toml\nFRP connection log: journalctl -u frpc.service -n 30 --no-pager\n' "$FRPC_DIR"
+    printf 'FRP config and STCP key: %s/frpc.toml (root only)\nFRP connection log: journalctl -u frpc.service -n 30 --no-pager\n' "$FRPC_DIR"
 fi
 
 if [[ $INSTALL_TROJAN == 1 ]]; then
