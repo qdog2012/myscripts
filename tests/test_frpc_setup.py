@@ -41,7 +41,7 @@ class FrpcSetupTests(unittest.TestCase):
                 try:
                     enter_after(b'IPv4', '999.0.0.1')
                     enter_after(b'IPv4', '192.0.2.23')
-                    enter_after(b'token: ', token)
+                    enter_after('token（输入不回显）: '.encode(), token)
                     enter_after('本服务器名'.encode(), 'host-1.example.net')
                     self.assertEqual(proc.wait(timeout=5), 0)
                     self.assertNotIn(token.encode(), output)

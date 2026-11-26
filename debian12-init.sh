@@ -492,7 +492,7 @@ prompt_frpc_settings() {
     # Read the token into an unexported variable and keep it out of child arguments.
     unset FRPC_TOKEN
     while true; do
-        if ! IFS= read -rs -u "$input_fd" -p '请输入 FRP 认证 token: ' FRPC_TOKEN; then
+        if ! IFS= read -rs -u "$input_fd" -p '请输入 FRP 认证 token（输入不回显）: ' FRPC_TOKEN; then
             printf '\n' >&2
             die 'FRP input cancelled; installation has not started.'
         fi
