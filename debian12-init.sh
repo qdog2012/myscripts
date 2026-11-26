@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian 12: 1Panel, Docker, OpenResty, Trojan, Node.js, XFCE, Chrome, and TigerVNC.
+# Debian 12: 1Panel, Docker, OpenResty, Trojan, FRP client, Node.js, XFCE, Chrome, and TigerVNC.
 set -Eeuo pipefail
 umask 077
 
@@ -23,6 +23,12 @@ TROJAN_DOMAIN=
 TROJAN_PASSWORD=
 TROJAN_CREDENTIALS_FILE=/root/.config/debian12-init/trojan
 TROJAN_TLS_DIR=/etc/trojan/tls
+INSTALL_FRPC=${INSTALL_FRPC:-1}
+FRPC_VERSION=0.71.0
+FRPC_RELEASE_SHA256=84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716
+FRPC_BINARY_SHA256=f79fff8de3089ec711ff8bdd4b73e00dfe491a1c3d754983c8b0f8d58c21b068
+FRPC_DIR=$PANEL_BASE_DIR/service/frp
+FRPC_SERVER_PORT=9997
 SERVER_TIMEZONE=${SERVER_TIMEZONE:-auto}
 DATE_LOCALE=${DATE_LOCALE:-auto}
 DESKTOP_USER=${DESKTOP_USER:-desktop}
@@ -458,6 +464,145 @@ install_trojan() {
     systemctl is-enabled --quiet trojan.service || die 'Trojan service is not enabled at boot.'
 }
 
+valid_frpc_ipv4() {
+    local octet
+    local -a octets
+    [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<< "$1"
+    for octet in "${octets[@]}"; do
+        [[ $octet == 0 || $octet != 0* ]] && (( octet <= 255 )) || return 1
+    done
+}
+
+prompt_frpc_settings() {
+    [[ $INSTALL_FRPC == 1 ]] || return 0
+    local input_fd
+    if [[ -t 0 ]]; then
+        input_fd=0
+    elif ! { exec {input_fd}</dev/tty; } 2>/dev/null; then
+        die 'FRP setup requires a terminal for the server IP, token and name (or set INSTALL_FRPC=0).'
+    fi
+    log "Configuring FRP client (QUIC UDP $FRPC_SERVER_PORT)"
+    while true; do
+        IFS= read -r -u "$input_fd" -p '请输入 FRP 服务器 IPv4 地址: ' FRPC_SERVER_IP ||
+            die 'FRP input cancelled; installation has not started.'
+        valid_frpc_ipv4 "$FRPC_SERVER_IP" && break
+        printf '请输入有效的 IPv4 地址，不含端口。\n' >&2
+    done
+    # Read the token into an unexported variable and keep it out of child arguments.
+    unset FRPC_TOKEN
+    while true; do
+        if ! IFS= read -rs -u "$input_fd" -p '请输入 FRP 认证 token: ' FRPC_TOKEN; then
+            printf '\n' >&2
+            die 'FRP input cancelled; installation has not started.'
+        fi
+        printf '\n' >&2
+        [[ -n $FRPC_TOKEN && $FRPC_TOKEN != *[[:cntrl:]]* ]] && break
+        printf 'Token 不能为空或包含控制字符。\n' >&2
+    done
+    while true; do
+        IFS= read -r -u "$input_fd" -p '请输入本服务器名（代理名称前缀）: ' FRPC_HOST_NAME ||
+            die 'FRP input cancelled; installation has not started.'
+        [[ $FRPC_HOST_NAME =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] && break
+        printf '服务器名须以字母或数字开头，最多 63 个字符，可包含字母、数字、点、下划线和连字符。\n' >&2
+    done
+    if [[ $input_fd != 0 ]]; then exec {input_fd}<&-; fi
+}
+
+write_frpc_config() {
+    local token=${FRPC_TOKEN//\\/\\\\}
+    token=${token//\"/\\\"}
+    cat > "$1" <<EOF
+serverAddr = "$FRPC_SERVER_IP"
+serverPort = $FRPC_SERVER_PORT
+loginFailExit = false
+transport.protocol = "quic"
+auth.method = "token"
+auth.token = "$token"
+
+[[proxies]]
+name = "${FRPC_HOST_NAME}_vnc"
+type = "stcp"
+secretKey = "$token"
+localIP = "127.0.0.1"
+localPort = $VNC_PORT
+
+[[proxies]]
+name = "${FRPC_HOST_NAME}_https"
+type = "stcp"
+secretKey = "$token"
+localIP = "127.0.0.1"
+localPort = $OPENRESTY_HTTPS_PORT
+
+[[proxies]]
+name = "${FRPC_HOST_NAME}_api"
+type = "stcp"
+secretKey = "$token"
+localIP = "127.0.0.1"
+localPort = 443
+EOF
+}
+
+install_frpc() {
+    [[ $INSTALL_FRPC == 1 ]] || return 0
+    local release="frp_${FRPC_VERSION}_linux_amd64" archive
+    local binary="$FRPC_DIR/frpc" config="$FRPC_DIR/frpc.toml"
+    local unit=/etc/systemd/system/frpc.service backup_dir
+    log "Installing FRP client $FRPC_VERSION for $FRPC_SERVER_IP:$FRPC_SERVER_PORT"
+    [[ -n $WORK_DIR ]] || WORK_DIR=$(mktemp -d /tmp/debian12-init.XXXXXXXX)
+    if [[ ! -x $binary ]] ||
+       ! printf '%s  %s\n' "$FRPC_BINARY_SHA256" "$binary" | sha256sum --check --status 2>/dev/null; then
+        archive="$WORK_DIR/$release.tar.gz"
+        curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+            "https://github.com/fatedier/frp/releases/download/v$FRPC_VERSION/$release.tar.gz" -o "$archive"
+        printf '%s  %s\n' "$FRPC_RELEASE_SHA256" "$archive" | sha256sum --check --status ||
+            die 'FRP release archive SHA-256 verification failed.'
+        binary="$WORK_DIR/frpc"
+        tar -xOzf "$archive" "$release/frpc" > "$binary"
+        chmod 755 "$binary"
+    fi
+
+    write_frpc_config "$WORK_DIR/frpc.toml"
+    unset FRPC_TOKEN
+    "$binary" verify -c "$WORK_DIR/frpc.toml" >/dev/null 2>&1 || die 'Generated frpc.toml failed validation.'
+
+    cat > "$WORK_DIR/frpc.service" <<EOF
+[Unit]
+Description=FRP client
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+LoadCredential=frpc.toml:$config
+ExecStart=$FRPC_DIR/frpc -c %d/frpc.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    install -d -m 755 "$FRPC_DIR"
+    if { [[ -f $config ]] && ! cmp -s -- "$config" "$WORK_DIR/frpc.toml"; } ||
+       { [[ -f $unit ]] && ! cmp -s -- "$unit" "$WORK_DIR/frpc.service"; }; then
+        backup_dir=$(mktemp -d "$FRPC_DIR/backup.XXXXXXXX")
+        [[ ! -f $config ]] || install -m 600 "$config" "$backup_dir/frpc.toml"
+        [[ ! -f $unit ]] || install -m 600 "$unit" "$backup_dir/frpc.service"
+        log "Previous frpc configuration backed up to $backup_dir"
+    fi
+    if [[ $binary != "$FRPC_DIR/frpc" ]]; then
+        install -m 755 "$binary" "$FRPC_DIR/frpc"
+    fi
+    install -m 600 "$WORK_DIR/frpc.toml" "$config"
+    install -m 644 "$WORK_DIR/frpc.service" "$unit"
+    systemctl daemon-reload
+    systemctl enable frpc.service
+    systemctl restart frpc.service
+    systemctl is-active --quiet frpc.service || die 'frpc failed to start; check journalctl -u frpc.service.'
+    systemctl is-enabled --quiet frpc.service || die 'frpc.service is not enabled at boot.'
+}
+
 [[ $EUID -eq 0 ]] || die 'Run this script as root.'
 [[ $(. /etc/os-release; printf '%s' "$ID:$VERSION_ID") == debian:12 ]] || die 'Debian 12 is required.'
 [[ $(uname -m) == x86_64 ]] || die 'This script currently supports x86_64 only (Chrome amd64 package).'
@@ -470,6 +615,7 @@ install_trojan() {
 [[ $INSTALL_OPENRESTY == 0 || $INSTALL_DOCKER == 1 ]] || die 'OpenResty requires Docker (set INSTALL_DOCKER=1).'
 [[ $VNC_GEOMETRY =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die 'Invalid VNC_GEOMETRY (expected WIDTHxHEIGHT).'
 [[ $INSTALL_TROJAN == 0 || $INSTALL_TROJAN == 1 ]] || die 'INSTALL_TROJAN must be 0 or 1.'
+[[ $INSTALL_FRPC == 0 || $INSTALL_FRPC == 1 ]] || die 'INSTALL_FRPC must be 0 or 1.'
 if [[ $INSTALL_TROJAN == 1 ]]; then
     [[ $TROJAN_PORT =~ ^[1-9][0-9]{3,4}$ ]] && (( TROJAN_PORT >= 1024 && TROJAN_PORT <= 65535 )) || die 'Invalid TROJAN_PORT.'
     [[ $TROJAN_PORT -ne $PANEL_PORT && $TROJAN_PORT -ne $VNC_PORT &&
@@ -479,6 +625,7 @@ fi
 # Ask before DNS changes, apt, or any other system mutation. /dev/tty also
 # supports curl | bash when run from an interactive SSH terminal.
 prompt_trojan_domain
+prompt_frpc_settings
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -859,6 +1006,7 @@ done
 ss -ltn | grep -qE '127\.0\.0\.1:5901[[:space:]]' || die 'TigerVNC is not listening on 127.0.0.1:5901.'
 
 install_trojan
+install_frpc
 
 # Install the panel stack last so desktop access is ready before this stage.
 if ! command -v 1pctl >/dev/null 2>&1; then
@@ -1265,6 +1413,12 @@ if ((${#CLOUD_AGENT_WARNINGS[@]})); then
     printf 'Cloud agents requiring manual disable: %s\n' "${CLOUD_AGENT_WARNINGS[*]}"
 fi
 printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
+
+if [[ $INSTALL_FRPC == 1 ]]; then
+    printf '\nFRP client: frpc.service (enabled at boot)\nFRP server: %s:%s (QUIC UDP)\n' "$FRPC_SERVER_IP" "$FRPC_SERVER_PORT"
+    printf 'FRP proxies: %s_vnc, %s_https, %s_api\n' "$FRPC_HOST_NAME" "$FRPC_HOST_NAME" "$FRPC_HOST_NAME"
+    printf 'FRP config: %s/frpc.toml\nFRP connection log: journalctl -u frpc.service -n 30 --no-pager\n' "$FRPC_DIR"
+fi
 
 if [[ $INSTALL_TROJAN == 1 ]]; then
     printf '\nTrojan server/SNI: %s\nTrojan TCP port: %s\nTrojan password: %s\n' "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_PASSWORD"

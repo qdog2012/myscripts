@@ -1,8 +1,8 @@
 # Debian 12 server setup
 
 `debian12-init.sh` installs 1Panel, Docker with Compose, OpenResty through the
-1Panel app store, Trojan with TLS, a small XFCE desktop, Google Chrome, and
-TigerVNC on a fresh Debian 12 amd64 server. It also installs Node.js `v24.21.0`, `tmux`, `htop`,
+1Panel app store, Trojan with TLS, the FRP client, a small XFCE desktop, Google
+Chrome, and TigerVNC on a fresh Debian 12 amd64 server. It also installs Node.js `v24.21.0`, `tmux`, `htop`,
 and `vim`, disables Vim mouse mode by default, and adds interactive Bash aliases
 for `ll`, `cp -i`, and `mv -i`. Run it as root:
 
@@ -11,13 +11,13 @@ curl -fsSLO https://raw.githubusercontent.com/qdog2012/myscripts/main/debian12-i
 bash debian12-init.sh
 ```
 
-Before changing the system, the script prompts for the Trojan domain in the
-terminal. No domain is hard-coded. It then configures public DNS and completes
-base utilities, Node.js, time zone/date settings, XFCE, TigerVNC, and Chrome.
-After verifying VNC is listening on
-`127.0.0.1:5901`, it configures Trojan, then installs the 1Panel/Docker/OpenResty
-stack as the final stage. If either later stage fails, the configured desktop
-and VNC service remain available.
+Before changing the system, the script prompts for the Trojan domain and the
+FRP server IPv4 address, authentication token, and local server name. It then
+configures public DNS and completes base utilities, Node.js, time zone/date
+settings, XFCE, TigerVNC, and Chrome. After verifying VNC is listening on
+`127.0.0.1:5901`, it configures Trojan and frpc, then installs the
+1Panel/Docker/OpenResty stack as the final stage. If a later stage fails, the
+configured desktop and VNC service remain available.
 
 The script installs OpenSSH Server and changes its listening port to **2424**
 after the base packages are ready. Allow inbound TCP `2424` in the cloud
@@ -242,13 +242,38 @@ ss -lntp | grep ':8443'
 If startup fails, resolve any port conflict and rerun the installer. The
 desktop, VNC, and generated Trojan password remain available.
 
+## FRP client for an existing server
+
+The initialization script installs the checksummed Linux amd64 FRP client
+`0.71.0` under `/serverdata/service/frp`. The startup prompt reads the token
+without echoing it. The client uses QUIC on UDP `9997`. The existing FRP server
+must accept QUIC on that port and use the token entered at startup.
+
+The local server name is used as the prefix for the STCP proxy names:
+
+| Proxy name | Local destination |
+| --- | --- |
+| `<name>_vnc` | `127.0.0.1:5901` |
+| `<name>_https` | `127.0.0.1:18443` |
+| `<name>_api` | `127.0.0.1:443` |
+
+As in the source configuration, all three STCP keys use the entered token.
+Keep `/serverdata/service/frp/frpc.toml` private. On a rerun, changed settings
+replace the generated config and the previous file is preserved in a private
+`backup.*` directory next to it. `frpc.service` starts at boot and retries if
+the connection to the server is unavailable. View registration and connection
+errors with `journalctl -u frpc.service -n 30 --no-pager`. For the HTTPS and API
+proxies to forward traffic, their local listeners need to be running.
+
+Set `INSTALL_FRPC=0` when running the script to skip its FRP prompts and setup.
+
 ## FRP tunnel through an internal server
 
 For a persistent FRP STCP tunnel from a separate internal Linux server to the
 existing OpenResty HTTPS listener, see [frp-tunnel.md](frp-tunnel.md).
 The optional `install-frp-tunnel.sh` and `install-frp-visitor.sh` installers create
 systemd services, verify release checksums, and enable certificate validation.
-They are separate from the default Debian initialization script.
+These optional installers provide a separate FRP setup with mutual TLS.
 
 ## Ubuntu 24.04 Docker installation
 
