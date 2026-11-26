@@ -215,11 +215,13 @@ rerun the installer before expiry to generate a replacement.
 
 The installer enables `trojan.service` at boot, checks a local TLS handshake
 against the generated certificate and domain, and prints the server, port,
-password, certificate SHA-256 fingerprint, and a `trojan://` import link for
-Spectre. Keep TLS enabled. If the client supports trusting/pinning this
-certificate, configure that; otherwise enable **skip certificate verification**
-in Spectre. Skipping verification encrypts traffic but does not authenticate
-the server. The import link may not set this option; check it in the client.
+password, and certificate SHA-256 fingerprint. The summary ends with the
+`trojan://` import link and a QR code rendered by `qrencode`. Scan the code
+in Spectre or copy the link to import the node. Keep TLS enabled. If the client
+supports trusting or pinning this certificate, configure that. Otherwise,
+enable **skip certificate verification** in Spectre. Skipping verification
+encrypts traffic without authenticating the server. Check this setting after
+importing from the link or QR code.
 Credentials are also saved in
 `/root/.config/debian12-init/trojan` with mode `0600`. An existing Trojan
 installation not managed by this script must be migrated before running this

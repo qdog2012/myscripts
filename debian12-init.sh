@@ -432,7 +432,7 @@ install_trojan() {
     # Install the override before the package so its post-install start uses our
     # valid config, rather than the packaged example listening on port 443.
     systemctl daemon-reload
-    apt-get install -y --no-install-recommends trojan
+    apt-get install -y --no-install-recommends trojan qrencode
     systemctl daemon-reload
     systemctl enable trojan.service
     if ! systemctl restart trojan.service; then
@@ -1258,15 +1258,6 @@ printf '1Panel account: %s\n1Panel password: %s\n' "$PANEL_USER" "$PANEL_PASSWOR
 if [[ $INSTALL_OPENRESTY == 1 ]]; then
     printf 'OpenResty HTTPS: %s\nTLS stream config: %s\n' "$OPENRESTY_HTTPS_PORT" "$STREAM_CONFIG_DIR/tls-forward-443.conf"
 fi
-if [[ $INSTALL_TROJAN == 1 ]]; then
-    printf 'Trojan server/SNI: %s\nTrojan TCP port: %s\nTrojan password: %s\n' "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_PASSWORD"
-    printf 'Spectre import: trojan://%s@%s:%s?security=tls&sni=%s#Trojan\n' \
-        "$TROJAN_PASSWORD" "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_DOMAIN"
-    printf 'Trojan certificate: %s/server.crt (self-signed; 3650 days)\n' "$TROJAN_TLS_DIR"
-    openssl x509 -in "$TROJAN_TLS_DIR/server.crt" -noout -sha256 -fingerprint
-    printf 'Spectre: TLS enabled; trust/pin the certificate if supported, otherwise enable skip certificate verification. Allow inbound TCP %s.\n' "$TROJAN_PORT"
-    printf 'Trojan credentials: %s\n' "$TROJAN_CREDENTIALS_FILE"
-fi
 printf 'Desktop user: %s\nVNC authentication: none (loopback only)\n' "$DESKTOP_USER"
 printf 'VNC tunnel: ssh -p %s -L 5901:127.0.0.1:5901 root@YOUR_SERVER\n' "$SSH_TUNNEL_PORT"
 printf 'VNC viewer: 127.0.0.1:5901\n'
@@ -1274,3 +1265,17 @@ if ((${#CLOUD_AGENT_WARNINGS[@]})); then
     printf 'Cloud agents requiring manual disable: %s\n' "${CLOUD_AGENT_WARNINGS[*]}"
 fi
 printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
+
+if [[ $INSTALL_TROJAN == 1 ]]; then
+    printf '\nTrojan server/SNI: %s\nTrojan TCP port: %s\nTrojan password: %s\n' "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_PASSWORD"
+    printf 'Trojan certificate: %s/server.crt (self-signed; 3650 days)\n' "$TROJAN_TLS_DIR"
+    openssl x509 -in "$TROJAN_TLS_DIR/server.crt" -noout -sha256 -fingerprint
+    printf 'Spectre: TLS enabled; trust/pin the certificate if supported, otherwise enable skip certificate verification. Allow inbound TCP %s.\n' "$TROJAN_PORT"
+    printf 'Trojan credentials: %s\n' "$TROJAN_CREDENTIALS_FILE"
+    printf -v TROJAN_URI 'trojan://%s@%s:%s?security=tls&sni=%s#Trojan' \
+        "$TROJAN_PASSWORD" "$TROJAN_DOMAIN" "$TROJAN_PORT" "$TROJAN_DOMAIN"
+    printf '\nSpectre import: %s\nSpectre import QR code:\n' "$TROJAN_URI"
+    if ! printf '%s' "$TROJAN_URI" | qrencode -t ANSIUTF8 -o -; then
+        printf 'Could not render the QR code. Use the Spectre import link above.\n' >&2
+    fi
+fi
