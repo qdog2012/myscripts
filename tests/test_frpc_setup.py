@@ -22,7 +22,8 @@ class FrpcSetupTests(unittest.TestCase):
             master, slave = pty.openpty()
             try:
                 proc = subprocess.Popen(
-                    ['bash', '-c', PREAMBLE + '\nprompt_frpc_settings\nwrite_frpc_config "$1"',
+                    ['bash', '-c', PREAMBLE + '\nunset SERVER_PREFIX\nprompt_frpc_settings\nprompt_server_prefix\n'
+                     'printf "%s\\n" "$SERVER_HOSTNAME" > "$1.hostname"\nwrite_frpc_config "$1"',
                      'test-frpc', str(config)], stdin=slave, stdout=slave, stderr=slave)
                 os.close(slave)
                 slave = None
@@ -42,7 +43,8 @@ class FrpcSetupTests(unittest.TestCase):
                     enter_after(b'IPv4', '999.0.0.1')
                     enter_after(b'IPv4', '192.0.2.23')
                     enter_after('token（输入不回显）: '.encode(), token)
-                    enter_after('本服务器名'.encode(), 'host-1.example.net')
+                    enter_after('服务器前缀'.encode(), 'invalid_name')
+                    enter_after('服务器前缀'.encode(), 'us3')
                     self.assertEqual(proc.wait(timeout=5), 0)
                     self.assertNotIn(token.encode(), output)
                 finally:
@@ -54,6 +56,7 @@ class FrpcSetupTests(unittest.TestCase):
                 if slave is not None:
                     os.close(slave)
 
+            self.assertEqual(Path(f'{config}.hostname').read_text(), 'us3-server\n')
             data = tomllib.loads(config.read_text())
             self.assertEqual(data['serverAddr'], '192.0.2.23')
             self.assertEqual(data['serverPort'], 9997)
@@ -66,7 +69,7 @@ class FrpcSetupTests(unittest.TestCase):
             for proxy, (suffix, port) in zip(data['proxies'],
                                             [('vnc', 5901), ('https', 18443), ('api', 443)],
                                             strict=True):
-                self.assertEqual(proxy['name'], f'host-1.example.net_{suffix}')
+                self.assertEqual(proxy['name'], f'us3_{suffix}')
                 self.assertEqual(proxy['localPort'], port)
                 self.assertEqual(proxy['localIP'], '127.0.0.1')
                 self.assertEqual(proxy['secretKey'], key)
@@ -83,7 +86,7 @@ class FrpcSetupTests(unittest.TestCase):
             def generate(new_token):
                 command = PREAMBLE + '''
 FRPC_SERVER_IP=192.0.2.24
-FRPC_HOST_NAME=rerun
+SERVER_PREFIX=rerun
 FRPC_TOKEN=$3
 write_frpc_config "$1" "$2"
 '''

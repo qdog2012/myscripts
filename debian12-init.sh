@@ -480,7 +480,7 @@ prompt_frpc_settings() {
     if [[ -t 0 ]]; then
         input_fd=0
     elif ! { exec {input_fd}</dev/tty; } 2>/dev/null; then
-        die 'FRP setup requires a terminal for the server IP, token and name (or set INSTALL_FRPC=0).'
+        die 'FRP setup requires a terminal for the server IP and token (or set INSTALL_FRPC=0).'
     fi
     log "Configuring FRP client (QUIC UDP $FRPC_SERVER_PORT)"
     while true; do
@@ -500,13 +500,44 @@ prompt_frpc_settings() {
         [[ -n $FRPC_TOKEN && $FRPC_TOKEN != *[[:cntrl:]]* ]] && break
         printf 'Token 不能为空或包含控制字符。\n' >&2
     done
-    while true; do
-        IFS= read -r -u "$input_fd" -p '请输入本服务器名（代理名称前缀）: ' FRPC_HOST_NAME ||
-            die 'FRP input cancelled; installation has not started.'
-        [[ $FRPC_HOST_NAME =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] && break
-        printf '服务器名须以字母或数字开头，最多 63 个字符，可包含字母、数字、点、下划线和连字符。\n' >&2
-    done
     if [[ $input_fd != 0 ]]; then exec {input_fd}<&-; fi
+}
+
+prompt_server_prefix() {
+    local LC_ALL=C input_fd prefix=${SERVER_PREFIX:-}
+    local valid_prefix='^[A-Za-z0-9]([A-Za-z0-9-]{0,54}[A-Za-z0-9])?$'
+    if [[ -n $prefix ]]; then
+        [[ $prefix =~ $valid_prefix ]] || die 'Invalid SERVER_PREFIX. Use 1–56 letters, digits or hyphens, with a letter or digit at each end.'
+    else
+        if [[ -t 0 ]]; then
+            input_fd=0
+        elif ! { exec {input_fd}</dev/tty; } 2>/dev/null; then
+            die 'Server prefix input requires a terminal. Set SERVER_PREFIX for unattended setup.'
+        fi
+        while true; do
+            IFS= read -r -u "$input_fd" -p '请输入服务器前缀（例如 us3，主机名将为 us3-server）: ' prefix ||
+                die 'Server prefix input cancelled; installation has not started.'
+            [[ $prefix =~ $valid_prefix ]] && break
+            printf '前缀须为 1–56 个字母、数字或连字符，首尾须为字母或数字。\n' >&2
+        done
+        if [[ $input_fd != 0 ]]; then exec {input_fd}<&-; fi
+    fi
+    SERVER_PREFIX=${prefix,,}
+    SERVER_HOSTNAME=$SERVER_PREFIX-server
+}
+
+configure_server_hostname() {
+    log "Setting system hostname to $SERVER_HOSTNAME"
+    hostnamectl set-hostname "$SERVER_HOSTNAME"
+    if ! getent -s files hosts "$SERVER_HOSTNAME" >/dev/null; then
+        printf '\n127.0.1.1\t%s\n' "$SERVER_HOSTNAME" >> /etc/hosts
+    fi
+    if [[ -d /etc/cloud/cloud.cfg.d ]]; then
+        printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-debian12-init-hostname.cfg
+        chmod 644 /etc/cloud/cloud.cfg.d/99-debian12-init-hostname.cfg
+    fi
+    [[ $(hostnamectl --static) == "$SERVER_HOSTNAME" && $(hostname) == "$SERVER_HOSTNAME" ]] ||
+        die "Failed to apply hostname: $SERVER_HOSTNAME"
 }
 
 existing_frpc_stcp_key() {
@@ -548,21 +579,21 @@ auth.method = "token"
 auth.token = "$token"
 
 [[proxies]]
-name = "${FRPC_HOST_NAME}_vnc"
+name = "${SERVER_PREFIX}_vnc"
 type = "stcp"
 secretKey = "$stcp_key"
 localIP = "127.0.0.1"
 localPort = $VNC_PORT
 
 [[proxies]]
-name = "${FRPC_HOST_NAME}_https"
+name = "${SERVER_PREFIX}_https"
 type = "stcp"
 secretKey = "$stcp_key"
 localIP = "127.0.0.1"
 localPort = $OPENRESTY_HTTPS_PORT
 
 [[proxies]]
-name = "${FRPC_HOST_NAME}_api"
+name = "${SERVER_PREFIX}_api"
 type = "stcp"
 secretKey = "$stcp_key"
 localIP = "127.0.0.1"
@@ -653,6 +684,7 @@ fi
 # supports curl | bash when run from an interactive SSH terminal.
 prompt_trojan_domain
 prompt_frpc_settings
+prompt_server_prefix
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -698,6 +730,7 @@ if [[ $DNS_BOOTSTRAPPED == 1 ]]; then
     timeout 15 getent ahostsv4 deb.debian.org >/dev/null || die 'systemd-resolved cannot resolve deb.debian.org after installation.'
 fi
 
+configure_server_hostname
 configure_ssh_port
 
 log 'Setting vm.swappiness=60'
@@ -1416,6 +1449,7 @@ PANEL_PUBLIC_IP=${PUBLIC_IP:-$(curl -4fsSL --max-time 10 https://api.ipify.org |
 SSH_TUNNEL_PORT=${SSH_TUNNEL_PORT:-$SSH_PORT}
 [[ $SSH_TUNNEL_PORT =~ ^[0-9]{1,5}$ ]] || SSH_TUNNEL_PORT=$SSH_PORT
 printf '\n===== Setup complete =====\n'
+printf 'Server hostname: %s\n' "$SERVER_HOSTNAME"
 printf 'SSH port: %s\nSSH connection: ssh -p %s root@%s\n' "$SSH_PORT" "$SSH_TUNNEL_PORT" "$PANEL_PUBLIC_IP"
 printf 'Public DNS: 1.1.1.1, 8.8.8.8 (systemd-resolved; more specific per-link DNS routes preserved)\n'
 printf 'Swap tendency: vm.swappiness=%s\n' "$(sysctl -n vm.swappiness)"
@@ -1441,7 +1475,7 @@ printf 'Root-only credentials copy: %s\n' "$CREDENTIALS_FILE"
 
 if [[ $INSTALL_FRPC == 1 ]]; then
     printf '\nFRP client: frpc.service (enabled at boot)\nFRP server: %s:%s (QUIC UDP)\n' "$FRPC_SERVER_IP" "$FRPC_SERVER_PORT"
-    printf 'FRP proxies: %s_vnc, %s_https, %s_api\n' "$FRPC_HOST_NAME" "$FRPC_HOST_NAME" "$FRPC_HOST_NAME"
+    printf 'FRP proxies: %s_vnc, %s_https, %s_api\n' "$SERVER_PREFIX" "$SERVER_PREFIX" "$SERVER_PREFIX"
     printf 'FRP config and STCP key: %s/frpc.toml (root only)\nFRP connection log: journalctl -u frpc.service -n 30 --no-pager\n' "$FRPC_DIR"
 fi
 

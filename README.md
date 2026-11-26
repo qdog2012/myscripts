@@ -12,12 +12,19 @@ bash debian12-init.sh
 ```
 
 Before changing the system, the script prompts for the Trojan domain and the
-FRP server IPv4 address, authentication token, and local server name. It then
+FRP server IPv4 address, authentication token, and local server prefix. It then
 configures public DNS and completes base utilities, Node.js, time zone/date
 settings, XFCE, TigerVNC, and Chrome. After verifying VNC is listening on
 `127.0.0.1:5901`, it configures Trojan and frpc, then installs the
 1Panel/Docker/OpenResty stack as the final stage. If a later stage fails, the
 configured desktop and VNC service remain available.
+
+The server prefix sets the persistent hostname to `<prefix>-server`. For
+example, `us3` sets the hostname to `us3-server` and the FRP proxy prefix to
+`us3`. The prefix is converted to lowercase. Use 1–56 letters, digits, or
+hyphens, with a letter or digit at each end. Set `SERVER_PREFIX=us3` to supply
+the value without a prompt, including when `INSTALL_FRPC=0`. Where cloud-init
+is installed, the script configures it to preserve the new hostname.
 
 The script installs OpenSSH Server and changes its listening port to **2424**
 after the base packages are ready. Allow inbound TCP `2424` in the cloud
@@ -202,8 +209,8 @@ Invalid values are rejected before any system changes. Reruns still prompt;
 press Enter to reuse the previous domain or enter a replacement. The random
 48-character password is retained across reruns. The prompt reads from the
 terminal even with `curl | bash`; downloading and then running the script as
-shown above is recommended. Without a terminal it stops before changing the
-system, unless Trojan is disabled.
+shown above is recommended. Set `INSTALL_TROJAN=0` to skip this prompt in an
+unattended installation.
 
 The certificate includes the entered domain in its Subject Alternative Name
 and is valid for 3650 days. Reruns reuse a matching certificate and key if more
@@ -249,7 +256,7 @@ The initialization script installs the checksummed Linux amd64 FRP client
 without echoing it. The client uses QUIC on UDP `9997`. The existing FRP server
 must accept QUIC on that port and use the token entered at startup.
 
-The local server name is used as the prefix for the STCP proxy names:
+The local server prefix is used for the STCP proxy names:
 
 | Proxy name | Local destination |
 | --- | --- |
